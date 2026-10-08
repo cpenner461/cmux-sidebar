@@ -27,10 +27,12 @@ done
 
 # Register the automations that keep each workspace description in sync with
 # Claude's latest summary and its "turn finished" marker (see
-# automations/workspace-state.sh). Replaces our own rules (ids prefixed
-# cmux-panel-) and leaves any other rules alone.
+# automations/workspace-state.sh), and that name each unnamed workspace after
+# the project its agent works in (see automations/name-workspace.sh). Replaces
+# our own rules (ids prefixed cmux-panel-) and leaves any other rules alone.
 automations="${CMUX_AUTOMATIONS_FILE:-$HOME/.cmuxterm/automations.json}"
 state_script="$repo_dir/automations/workspace-state.sh"
+name_script="$repo_dir/automations/name-workspace.sh"
 mkdir -p "$(dirname "$automations")"
 if [ -e "$automations" ]; then
   cp "$automations" "$automations.$(date +%Y%m%d-%H%M%S).bak"
@@ -38,17 +40,19 @@ else
   echo '{"version": 1, "rules": []}' > "$automations"
 fi
 tmp="$(mktemp)"
-jq --arg cmd "$state_script" '
-  def rule($id; $event; $mode): {
+jq --arg state "$state_script" --arg name "$name_script" '
+  def rule($id; $event; $command): {
     id: ("cmux-panel-" + $id),
     when: { event: $event },
     rate_limit: { interval_seconds: 1, maximum: 20 },
-    then: [{ action: "run", command: ($cmd + " " + $mode), timeout_seconds: 30 }]
+    then: [{ action: "run", command: $command, timeout_seconds: 30 }]
   };
   .rules = ([.rules[]? | select(.id | startswith("cmux-panel-") | not)] + [
-    rule("turn-finished"; "agent.hook.Stop"; "stop"),
-    rule("prompt-submitted"; "agent.hook.UserPromptSubmit"; "prompt"),
-    rule("notification-summary"; "notification.created"; "notification")
+    rule("turn-finished"; "agent.hook.Stop"; $state + " stop"),
+    rule("prompt-submitted"; "agent.hook.UserPromptSubmit"; $state + " prompt"),
+    rule("notification-summary"; "notification.created"; $state + " notification"),
+    rule("name-workspace-session"; "agent.hook.SessionStart"; $name),
+    rule("name-workspace-prompt"; "agent.hook.UserPromptSubmit"; $name)
   ])' "$automations" > "$tmp"
 mv "$tmp" "$automations"
 cmux automation reload >/dev/null
@@ -66,3 +70,8 @@ cmux rpc extension.sidebar.snapshot '{}' | jq -r '.workspaces[] | "\(.id) \(.lat
       "$state_script" stop "$ws" </dev/null
     fi
   done
+
+# Name any workspace that still has no name of its own after the project of
+# an agent session already running in it.
+cmux sessions list --json | jq -r '.sessions[] | select(.cwd != null) | "\(.workspace_id)\t\(.cwd)"' |
+  while IFS=$'\t' read -r ws dir; do "$name_script" "$ws" "$dir" </dev/null; done

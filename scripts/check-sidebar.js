@@ -32,7 +32,7 @@ const ws = (o) => ({ id: "w1", title: "cycle-status-board", ...o,
   tabs: [{ id: "p0", surfaceId: "s0", title: "zsh" }, { id: "p1", surfaceId: "s1", title: "claude" }],
   agents: [{ id: "a1", kind: "claude", name: "Claude", status: "needs_input", title: "Fix board", lastActivityAt: 900, surfaceId: "s1", panelId: "p1" }] });
 console.log("== full data (object PRs)");
-set("workspaces", [ws({ description: "I've switched the Status tab to the GitHub App.",
+set("workspaces", [ws({ description: "I've switched the Status tab to the GitHub App.\u2064a1=claude-opus-5-5 zz999999=claude-sonnet-4-5-20250929\u2063",
   latestPrompt: '<pasted_content id="d12e"> Write the plan for <b>plan 4</b> </pasted_content>', branch: "cycle-status-board", dirty: true,
   prs: [{ number: 32, url: "https://github.com/x/y/pull/32", status: "open" }], ports: [4001, 56197] })]);
 dump(root);

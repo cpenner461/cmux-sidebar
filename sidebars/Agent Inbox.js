@@ -22,7 +22,24 @@ const ORDER = ["needs_input", "working", "idle", "none"];
 // submitted since.
 const TURN_DONE = "\u2063";
 const turnDone = (w) => (w.description ?? "").endsWith(TURN_DONE);
-const summaryOf = (w) => (w.description ?? "").replace(/\u2063+$/, "");
+// Before that marker, after an invisible U+2064, it lists the model each of the
+// workspace's sessions last answered with: "<session id prefix>=<model id>"
+// pairs, since sidebar data doesn't carry the model.
+const MODELS = "\u2064";
+const summaryOf = (w) => (w.description ?? "").replace(/\u2063+$/, "").split(MODELS)[0];
+function modelOf(w, a) {
+  const pairs = (w.description ?? "").replace(/\u2063+$/, "").split(MODELS)[1] ?? "";
+  const pair = pairs.split(" ").find((p) => p.startsWith(a.id.slice(0, 8) + "="));
+  return pair ? modelLabel(pair.slice(pair.indexOf("=") + 1)) : "";
+}
+
+// claude-opus-5-5 -> Opus 5.5, claude-sonnet-4-5-20250929 -> Sonnet 4.5.
+// Anything else shows as-is.
+function modelLabel(id) {
+  const m = id.match(/^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$/);
+  if (!m) return id;
+  return m[1][0].toUpperCase() + m[1].slice(1) + " " + m[2] + (m[3] ? "." + m[3] : "");
+}
 
 // The section a session belongs in. INBOX works like an unread filter:
 // a session that isn't working lands there while its workspace has unread
@@ -205,10 +222,15 @@ function row(e, strong, tint) {
       // Truncating text only outranks a Spacer on its own; wrapped in a stack
       // it ties with the Spacer and the two split the row, so raise the stack.
       VStack({ spacing: 1, alignment: "leading" }, [
-        when(() => editingKey() !== e().key, () =>
+        // The model sits after the title and outranks it, so a long title
+        // truncates before the model does.
+        when(() => editingKey() !== e().key, () => HStack({ spacing: 6 }, [
           Text(() => e().ws.title + (tabNumber(e()) ? " [^" + tabNumber(e()) + "]" : ""))
             .font(12).weight(strong ? "semibold" : "regular")
-            .lineLimit(1).truncation("tail")),
+            .lineLimit(1).truncation("tail"),
+          when(() => !!(e().a && modelOf(e().ws, e().a)), () => Text(() => modelOf(e().ws, e().a))
+            .font(10).color("secondary").lineLimit(1).layoutPriority(1)),
+        ])),
         when(() => editingKey() === e().key, () => renameField(e)),
         when(() => !!e().a, () => Text(() => {
           const running = (e().a.children ?? []).filter((c) => c.running).length;

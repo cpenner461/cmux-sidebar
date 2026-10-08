@@ -9,6 +9,11 @@
 #      reminder (~60s after a turn ends) as needs-input, exactly like a real
 #      permission prompt or question; the marker lets Agent Inbox tell them
 #      apart.
+#   3. Between the two, after an invisible separator (U+2064), the model each
+#      of the workspace's Claude sessions last answered with, as
+#      "<first 8 chars of session id>=<model id>" pairs. Hooks and sidebar
+#      data don't carry the model, so it comes from each session's transcript,
+#      refreshed on every run.
 #
 # Run by the cmux automation rules install.sh adds, with the event in
 # $CMUX_AUTOMATION_EVENT_JSON:
@@ -35,11 +40,29 @@ if [ -z "${CMUX_PANEL_LOCKED:-}" ]; then
   exec lockf -k -t 20 "${TMPDIR:-/tmp}/cmux-panel-$ws.lock" "$0" "$mode" "$ws"
 fi
 
+SEP="$(printf '\xe2\x81\xa4')"
+
+# The latest model in each of the workspace's Claude sessions, from the last
+# assistant message in its transcript. "<synthetic>" entries don't start with
+# "claude-", and quotes inside tool input are escaped, so neither matches.
+session_models() {
+  cmux sessions list --json |
+    jq -r --arg ws "$ws" '.sessions[]
+      | select(.agent == "claude" and (.workspace_id | ascii_downcase) == ($ws | ascii_downcase) and .transcript_path != null)
+      | "\(.session_id)\t\(.transcript_path)"' |
+    while IFS=$'\t' read -r sid transcript; do
+      model="$( (tail -r "$transcript" 2>/dev/null || true) | grep -m1 '"message":{"model":"claude-' | jq -r '.message.model // empty' || true)"
+      if [ -n "$model" ]; then printf '%s=%s ' "${sid:0:8}" "$model"; fi
+    done | sed 's/ $//'
+}
+
 snapshot="$(cmux rpc extension.sidebar.snapshot '{}')"
 current="$(jq -r --arg ws "$ws" '.workspaces[] | select(.id == $ws) | .description // empty' <<<"$snapshot")"
-summary="${current%"$MARK"}"
+body="${current%"$MARK"}"
 marked=""
-[ "$summary" != "$current" ] && marked="$MARK"
+[ "$body" != "$current" ] && marked="$MARK"
+summary="${body%%"$SEP"*}"
+models="$(session_models)"
 
 case "$mode" in
   stop) marked="$MARK" ;;
@@ -51,7 +74,7 @@ case "$mode" in
   *) echo "usage: $0 stop|prompt|notification [workspace-id]" >&2; exit 2 ;;
 esac
 
-next="$summary$marked"
+next="$summary${models:+$SEP$models}$marked"
 [ "$next" = "$current" ] && exit 0
 if [ -z "$next" ]; then
   cmux workspace-action --workspace "$ws" --action clear-description >/dev/null
