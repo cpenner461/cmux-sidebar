@@ -11,9 +11,10 @@
 // no light/dark signal, so tints stay hex: they need an alpha suffix.
 const STATUS_META = {
   needs_input: { label: "INBOX", color: "orange", strong: true, tint: "#FF9F0A" },
-  working: { label: "WORKING", color: "blue", strong: false, tint: "#0A84FF" },
-  idle: { label: "IDLE", color: "#8A9A8C", strong: false, tint: "#8E8E93", labelColor: "tertiary" },
-  none: { label: "AGENTLESS", color: "#636366", strong: false, tint: "#7F7F7F", labelColor: "tertiary", hideEmpty: true, border: "#5C5C60" },
+  working: { label: "WORKING", color: "purple", strong: false, tint: "#BF5AF2" },
+  idle: { label: "IDLE", color: "teal", strong: false, tint: "#40CBE0" },
+  // AGENTLESS is an outline with no fill: empty space, not another state.
+  none: { label: "AGENTLESS", color: "#AC8E68", strong: false, tint: "#AC8E68", hideEmpty: true, border: "#AC8E6880", fill: false },
 };
 const ORDER = ["needs_input", "working", "idle", "none"];
 
@@ -331,15 +332,269 @@ function sectionBody(meta, items) {
     // working, or idle at a glance.
     .paddingVertical(6)
     .cornerRadius(10)
-    .background(meta.tint + "1a");
+    .background(meta.fill === false ? null : meta.tint + "1a");
   // The sidebar runtime only draws solid borders (borderColor/borderWidth).
   return meta.border ? section.borderColor(meta.border).borderWidth(1) : section;
+}
+
+// RECENT FEED: what agents did, newest first, under the status sections.
+// Sidebars can't read files or keep state, so it is built by comparing each
+// data push with the last one. It starts over when cmux reloads the sidebar,
+// seeded from what cmux still holds (see feedSeed).
+const FEED_META = { label: "RECENT FEED", color: "blue", tint: "#0A84FF" };
+const FEED_MAX = 200;
+const FEED_ROWS = 10;
+const FEED_STEP = 25;
+// A finished turn's summary and a new turn's prompt are written by
+// automations that can land a moment after the status flips, so those events
+// keep refreshing their detail this many seconds.
+const FEED_GRACE = 20;
+
+const FEED_KIND = {
+  // Turns started and finished take WORKING's and IDLE's colors.
+  start: { glyph: "▶", color: "purple" },
+  done: { glyph: "✓", color: "teal" },
+  ask: { glyph: "◆", color: "orange" },
+  session: { glyph: "+", color: "secondary" },
+  ended: { glyph: "−", color: "tertiary" },
+  sub: { glyph: "↳", color: "#5E5CE6" },
+  subDone: { glyph: "↳", color: "tertiary" },
+  pr: { glyph: "⇡", color: "green" },
+};
+
+// A session's state for the feed. Unlike boardStatus, unread doesn't count:
+// the feed logs what agents did, not what you've looked at. The idle
+// reminder (needs_input after a finished turn) is just idle.
+const feedState = (w, a) => (a.status === "needs_input" && turnDone(w) ? "idle" : a.status);
+const feedList = (v) => (Array.isArray(v) ? v : []);
+const feedNum = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+const feedLive = (w) => feedList(w.agents).filter((a) => a.status !== "ended");
+const feedPrs = (w) => (feedList(w.prs).length ? feedList(w.prs) : w.pr ? [w.pr] : []);
+const prNumber = (p) => (typeof p === "string" ? p.match(/(\d+)\/?$/)?.[1] ?? "?" : p.number);
+const prState = (p) => (typeof p === "string" ? "" : p.status ?? "");
+
+// Local time without Date (the runtime has none): the clock's hour/minute/
+// second against its epoch give the UTC offset.
+function hhmm(t) {
+  const c = data.clock();
+  let off = 0;
+  if (c && feedNum(c.epoch) !== null) {
+    off = (c.hour ?? 0) * 3600 + (c.minute ?? 0) * 60 + (c.second ?? 0) - (Math.floor(c.epoch) % 86400);
+    if (off > 14 * 3600) off -= 86400;
+    if (off < -12 * 3600) off += 86400;
+    off = Math.round(off / 900) * 900;
+  }
+  const s = (((Math.floor(t) + off) % 86400) + 86400) % 86400;
+  const pad = (n) => String(n).padStart(2, "0");
+  return pad(Math.floor(s / 3600)) + ":" + pad(Math.floor(s / 60) % 60);
+}
+
+// The summary is fresh once workspace-state.sh has marked the turn finished;
+// before that the description still holds the previous turn's summary. A
+// question mid-turn replaces the description (the notification rule), so it
+// shows once it differs from what was there.
+const turnDetail = (w) => (turnDone(w) ? summaryOf(w).trim() : "");
+const promptDetail = (w) => cleanPrompt(w.latestPrompt);
+const askDetail = (w) => {
+  const base = summaryOf(w);
+  return (x) => (summaryOf(x) !== base ? summaryOf(x).trim() : "");
+};
+
+let feedLog = [];
+const [feedEvents, setFeedEvents] = signal(feedLog);
+let feedNextId = 1;
+let feedSeen = null; // "<ws>:<agent>" -> { status, title, children }, "pr:<url>" -> { status }
+
+function feedEvent(t, w, kind, verb, detail, refresh) {
+  return { id: feedNextId++, t, kind, verb, detail: detail ?? "", wsId: w.id, ws: w.title ?? "",
+    refresh: refresh ?? null, until: refresh ? t + FEED_GRACE : 0 };
+}
+
+// The prompt that started a session's latest turn and when: from the session's
+// own tab when cmux has it there, else the workspace's (its latest anywhere).
+function lastPrompt(w, a) {
+  const tab = feedList(w.tabs).find((t) =>
+    (a.panelId && t.id === a.panelId) || (a.surfaceId && t.surfaceId === a.surfaceId));
+  if (tab && feedNum(tab.latestAt) !== null) return { at: tab.latestAt, text: cleanPrompt(tab.latestPrompt) };
+  if (feedNum(w.latestAt) !== null && feedLive(w).length === 1) return { at: w.latestAt, text: cleanPrompt(w.latestPrompt) };
+  return null;
+}
+
+// What the feed starts with, from what cmux still holds: each live session's
+// latest prompt and where that turn stands (working, waiting since, or
+// finished at its last activity), subagents' starts and ends, and sessions
+// that have ended (the leftovers of /clear) at their last activity.
+function feedSeed(workspaces) {
+  const out = [];
+  for (const w of workspaces) {
+    for (const a of feedList(w.agents)) {
+      const last = feedNum(a.lastActivityAt);
+      if (a.status === "ended") {
+        if (last !== null) out.push(feedEvent(last, w, "ended", "ended a session", cleanPrompt(a.title)));
+        continue;
+      }
+      const s = feedState(w, a);
+      const p = lastPrompt(w, a);
+      const since = feedNum(a.sinceEpoch);
+      if (p) out.push(feedEvent(p.at, w, "start", "started a turn", p.text));
+      else if (s === "working" && (since ?? last) !== null) out.push(feedEvent(since ?? last, w, "start", "started a turn", promptDetail(w)));
+      if (s === "needs_input" && (since ?? last) !== null) out.push(feedEvent(since ?? last, w, "ask", "is waiting on you", ""));
+      else if (s === "idle" && last !== null && (!p || last >= p.at)) out.push(feedEvent(last, w, "done", "finished a turn", turnDetail(w)));
+      for (const c of feedList(a.children)) {
+        const label = c.label || "subagent";
+        if (feedNum(c.startedEpoch) !== null) out.push(feedEvent(c.startedEpoch, w, "sub", "started a subagent", label));
+        if (!c.running && feedNum(c.endedEpoch) !== null) out.push(feedEvent(c.endedEpoch, w, "subDone", "subagent finished", label));
+      }
+    }
+  }
+  return out.sort((x, y) => x.t - y.t || x.id - y.id);
+}
+
+function feedSnapshot(workspaces) {
+  const out = new Map();
+  for (const w of workspaces) {
+    for (const a of feedList(w.agents)) {
+      const children = {};
+      for (const c of feedList(a.children)) children[c.id] = !!c.running;
+      out.set(w.id + ":" + a.id, { status: feedState(w, a), title: cleanPrompt(a.title), children });
+    }
+    for (const p of feedPrs(w)) out.set("pr:" + prUrl(p), { status: prState(p) });
+  }
+  return out;
+}
+
+function feedDiff(workspaces, now) {
+  const out = [];
+  const present = new Set();
+  for (const w of workspaces) {
+    for (const a of feedList(w.agents)) {
+      present.add(w.id + ":" + a.id);
+      const was = feedSeen.get(w.id + ":" + a.id);
+      const s = feedState(w, a);
+      if (!was) {
+        if (s !== "ended") out.push(feedEvent(now, w, "session", "started a session", cleanPrompt(a.title)));
+      } else if (was.status !== s) {
+        if (s === "working") out.push(feedEvent(now, w, "start", "started a turn", promptDetail(w), promptDetail));
+        else if (s === "needs_input") out.push(feedEvent(now, w, "ask", "is waiting on you", "", askDetail(w)));
+        else if (s === "ended") out.push(feedEvent(now, w, "ended", "ended a session", was.title));
+        else if (was.status === "working") out.push(feedEvent(now, w, "done", "finished a turn", turnDetail(w), turnDetail));
+      }
+      for (const c of feedList(a.children)) {
+        const before = was?.children[c.id];
+        const label = c.label || "subagent";
+        if (before === undefined && c.running) out.push(feedEvent(now, w, "sub", "started a subagent", label));
+        else if (before === true && !c.running) out.push(feedEvent(now, w, "subDone", "subagent finished", label));
+      }
+    }
+    for (const p of feedPrs(w)) {
+      const was = feedSeen.get("pr:" + prUrl(p));
+      if (!was || (prState(p) && was.status !== prState(p))) {
+        out.push(feedEvent(now, w, "pr", "PR #" + prNumber(p) + " " + (prState(p) || "linked"), w.branch ?? ""));
+      }
+    }
+  }
+  // Sessions gone from the data without passing through "ended".
+  for (const [key, was] of feedSeen) {
+    if (key.startsWith("pr:") || present.has(key) || was.status === "ended") continue;
+    const w = workspaces.find((x) => key.startsWith(x.id + ":"));
+    if (w) out.push(feedEvent(now, w, "ended", "ended a session", was.title));
+  }
+  return out;
+}
+
+// Runs on every data push and writes only `feedLog`/`feedEvents`, which it
+// doesn't read reactively, so writing doesn't re-run it.
+computed(() => {
+  const workspaces = data.workspaces();
+  const now = Math.floor(epoch());
+  if (!Array.isArray(workspaces) || now === 0) return 0;
+  const byId = new Map(workspaces.map((w) => [w.id, w]));
+  let next = feedSeen === null ? feedSeed(workspaces) : feedLog.concat(feedDiff(workspaces, now));
+  let refreshed = false;
+  next = next.map((e) => {
+    if (!e.refresh || now > e.until || !byId.has(e.wsId)) return e;
+    const detail = e.refresh(byId.get(e.wsId));
+    if (!detail || detail === e.detail) return e;
+    refreshed = true;
+    return { ...e, detail };
+  });
+  if (next.length > FEED_MAX) next = next.slice(next.length - FEED_MAX);
+  const changed = refreshed || next.length !== feedLog.length || next[next.length - 1] !== feedLog[feedLog.length - 1];
+  feedSeen = feedSnapshot(workspaces);
+  if (changed) {
+    feedLog = next;
+    setFeedEvents(feedLog);
+  }
+  return now;
+});
+
+const [feedLimit, setFeedLimit] = signal(FEED_ROWS);
+const feedShown = computed(() => feedEvents().slice(-feedLimit()).reverse());
+const feedOlder = () => Math.max(0, feedEvents().length - feedLimit());
+const [feedOpen, setFeedOpen] = signal(true);
+
+// The feed starts short; "show more" steps back FEED_STEP events at a time
+// through what's held, and "show less" returns to FEED_ROWS.
+function moreLine(older, limit, setLimit) {
+  return HStack({ spacing: 10 }, [
+    when(() => older() > 0, () => Text(() => "show " + Math.min(FEED_STEP, older()) + " more (" + older() + " older)")
+      .font(10).color("secondary").paddingHorizontal(5).paddingVertical(1).cornerRadius(5)
+      .hoverBackground("#7f7f7f3d").onTap(() => setLimit(limit() + FEED_STEP))),
+    when(() => limit() > FEED_ROWS, () => Text("show less")
+      .font(10).color("tertiary").paddingHorizontal(5).paddingVertical(1).cornerRadius(5)
+      .hoverBackground("#7f7f7f3d").onTap(() => setLimit(FEED_ROWS))),
+    Spacer({ minLength: 0 }),
+  ]).paddingHorizontal(5);
+}
+
+function feedRow(e) {
+  const kind = () => FEED_KIND[e().kind] ?? FEED_KIND.session;
+  return HStack({ spacing: 6, alignment: "top" }, [
+    Text(() => hhmm(e().t)).font(10).monospaced().color("tertiary").lineLimit(1).fixedSize(),
+    Text(() => kind().glyph).font(10).monospaced().color(() => kind().color)
+      .frame({ width: 10, alignment: "center" }),
+    VStack({ spacing: 1, alignment: "leading" }, [
+      HStack({ spacing: 4 }, [
+        Text(() => e().ws).font(11).weight("semibold").lineLimit(1).truncation("tail"),
+        Text(() => e().verb).font(11).color("secondary").lineLimit(1).truncation("tail").layoutPriority(1),
+      ]),
+      when(() => !!e().detail, () => Text(() => e().detail)
+        .font(10).color("tertiary").lineLimit(2).truncation("tail")),
+    ]).layoutPriority(1),
+    Spacer({ minLength: 0 }),
+  ])
+    .paddingHorizontal(10).paddingVertical(3)
+    .cornerRadius(8)
+    .hoverBackground(FEED_META.tint + "2e")
+    .frame({ maxWidth: "infinity" })
+    .onTap(() => cmux("workspace.select", { workspace_id: e().wsId }));
+}
+
+// Styled like the status sections; tap the header to fold it.
+function feedSection() {
+  return VStack({ spacing: 3 }, [
+    HStack({ spacing: 6 }, [
+      Text(() => (feedOpen() ? "" : "▸ ") + FEED_META.label).font(10).weight("semibold").color(FEED_META.color),
+      Spacer(),
+      Text(() => (feedEvents().length ? "since " + hhmm(feedEvents()[0].t) : ""))
+        .font(10).monospaced().color("tertiary"),
+    ]).paddingHorizontal(10).frame({ maxWidth: "infinity" }).onTap(() => setFeedOpen(!feedOpen())),
+    when(feedOpen, () => VStack({ spacing: 0 }, [
+      ForEach({ items: feedShown, key: (e) => String(e.id) }, feedRow),
+      Text(() => (feedShown().length === 0 ? "—" : "")).font(10).color("tertiary").paddingHorizontal(10),
+      moreLine(feedOlder, feedLimit, setFeedLimit),
+    ])),
+  ])
+    .paddingVertical(6)
+    .cornerRadius(10)
+    .background(FEED_META.tint + "1a");
 }
 
 sidebar(() =>
   VStack({ spacing: 10 }, [
     Text("Agent Inbox").font(14).weight("semibold").paddingHorizontal(10),
     ...ORDER.map(statusSection),
+    feedSection(),
     Spacer(),
   ]).paddingHorizontal(6),
   { surface: "glass" }
