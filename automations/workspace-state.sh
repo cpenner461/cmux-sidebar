@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Keeps two things in each workspace's description, which custom sidebars can
+# Keeps four things in each workspace's description, which custom sidebars can
 # read (they are not given notification text or hook history):
 #
 #   1. Claude's latest notification text (the "what I did" summary the stock
@@ -10,16 +10,40 @@
 #      permission prompt or question; the marker lets Agent Inbox tell them
 #      apart.
 #   3. Between the two, after an invisible separator (U+2064), the model each
-#      of the workspace's Claude sessions last answered with, as
-#      "<first 8 chars of session id>=<model id>" pairs. Hooks and sidebar
-#      data don't carry the model, so it comes from each session's transcript,
-#      refreshed on every run.
+#      of the workspace's Claude sessions last answered with and when you last
+#      prompted it, as "<first 8 chars of session id>=<model id>@<epoch>"
+#      pairs. Hooks and sidebar data don't carry the model, and every subagent
+#      hand-back starts a turn that looks like a new prompt, so both come from
+#      each session's transcript, refreshed on every run. Agent Inbox times a
+#      run from that prompt, across the hand-back turns it sets off.
+#   4. After the models, after another invisible separator (U+2062), Claude's
+#      plan usage as record-usage.sh last cached it:
+#      "5h=<percent>@<reset epoch> 7d=<percent>@<reset epoch> t=<epoch>".
+#      Usage is account-wide, so every workspace carries the latest copy it
+#      saw, and Agent Inbox shows the one with the newest t.
+#
+# When a turn finishes in the selected workspace it also marks the workspace
+# unread. cmux doesn't count notifications for the workspace you're on, so
+# without this the turn skips Agent Inbox's INBOX and goes straight to IDLE.
+# Claude's notification for the turn clears a mark made before it, and it can
+# land before or after Stop, so both Stop and a notification once the turn
+# is done set it.
+#
+# Status pings are notifications too: Claude Code's idle reminder ("Claude is
+# waiting for your input"), its permission prompt ("Claude needs your
+# permission to use Bash") and cmux's "Agent is asking a question". They only
+# hold while the session waits, and answering a question or permission fires
+# no hook here, so a ping never outlives the next prompt or Stop, and the idle
+# reminder, which says nothing a finished turn doesn't, never replaces the
+# summary of the turn it follows.
 #
 # Run by the cmux automation rules install.sh adds, with the event in
 # $CMUX_AUTOMATION_EVENT_JSON:
 #   workspace-state.sh stop          on agent.hook.Stop              add marker
 #   workspace-state.sh prompt        on agent.hook.UserPromptSubmit  drop marker
 #   workspace-state.sh notification  on notification.created         new summary, keep marker
+# and by record-usage.sh when usage changes:
+#   workspace-state.sh usage <workspace-id>                            new usage
 # or by hand for one workspace:
 #   workspace-state.sh notification <workspace-id>
 set -euo pipefail
@@ -41,10 +65,14 @@ if [ -z "${CMUX_PANEL_LOCKED:-}" ]; then
 fi
 
 SEP="$(printf '\xe2\x81\xa4')"
+USAGE_SEP="$(printf '\xe2\x81\xa2')"
 
 # The latest model in each of the workspace's Claude sessions, from the last
-# assistant message in its transcript. "<synthetic>" entries don't start with
-# "claude-", and quotes inside tool input are escaped, so neither matches.
+# assistant message in its transcript, and the time of the last prompt you
+# typed, from the last user entry of origin "human" (hand-backs are "peer",
+# background task notices "task-notification"). "<synthetic>" entries don't
+# start with "claude-", and quotes inside tool input or prompts are escaped,
+# so neither pattern matches inside them.
 session_models() {
   cmux sessions list --json |
     jq -r --arg ws "$ws" '.sessions[]
@@ -52,7 +80,9 @@ session_models() {
       | "\(.session_id)\t\(.transcript_path)"' |
     while IFS=$'\t' read -r sid transcript; do
       model="$( (tail -r "$transcript" 2>/dev/null || true) | grep -m1 '"message":{"model":"claude-' | jq -r '.message.model // empty' || true)"
-      if [ -n "$model" ]; then printf '%s=%s ' "${sid:0:8}" "$model"; fi
+      asked="$( (tail -r "$transcript" 2>/dev/null || true) | grep -m1 '"origin":{"kind":"human"' |
+        jq -r 'select(.type == "user") | .timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdate' 2>/dev/null || true)"
+      if [ -n "$model$asked" ]; then printf '%s=%s%s ' "${sid:0:8}" "$model" "${asked:+@$asked}"; fi
     done | sed 's/ $//'
 }
 
@@ -61,20 +91,36 @@ current="$(jq -r --arg ws "$ws" '.workspaces[] | select(.id == $ws) | .descripti
 body="${current%"$MARK"}"
 marked=""
 [ "$body" != "$current" ] && marked="$MARK"
-summary="${body%%"$SEP"*}"
+summary="${body%%"$USAGE_SEP"*}"
+summary="${summary%%"$SEP"*}"
 models="$(session_models)"
+is_ping() {
+  case "$1" in
+    "Claude is waiting for your input" | "Claude needs your permission"* | "Agent is asking a question") return 0 ;;
+  esac
+  return 1
+}
+usage="$(cat "${XDG_CACHE_HOME:-$HOME/.cache}/cmux-panel/usage" 2>/dev/null || true)"
 
 case "$mode" in
-  stop) marked="$MARK" ;;
-  prompt) marked="" ;;
+  stop) marked="$MARK"; is_ping "$summary" && summary="" ;;
+  prompt) marked=""; is_ping "$summary" && summary="" ;;
   notification)
     text="$(jq -r --arg ws "$ws" '.workspaces[] | select(.id == $ws) | .latest_notification_text // empty' <<<"$snapshot")"
-    [ -n "$text" ] && summary="$text"
+    if [ -n "$text" ] && { [ "$text" != "Claude is waiting for your input" ] || [ -z "$summary" ]; }; then
+      summary="$text"
+    fi
     ;;
-  *) echo "usage: $0 stop|prompt|notification [workspace-id]" >&2; exit 2 ;;
+  usage) ;;
+  *) echo "usage: $0 stop|prompt|notification|usage [workspace-id]" >&2; exit 2 ;;
 esac
 
-next="$summary${models:+$SEP$models}$marked"
+if [ -n "$marked" ] && [ "$mode" != usage ] &&
+  [ "$(jq -r --arg ws "$ws" '.workspaces[] | select(.id == $ws) | .selected' <<<"$snapshot")" = true ]; then
+  cmux workspace-action --workspace "$ws" --action mark-unread >/dev/null
+fi
+
+next="$summary${models:+$SEP$models}${usage:+$USAGE_SEP$usage}$marked"
 [ "$next" = "$current" ] && exit 0
 if [ -z "$next" ]; then
   cmux workspace-action --workspace "$ws" --action clear-description >/dev/null

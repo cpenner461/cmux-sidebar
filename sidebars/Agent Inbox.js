@@ -18,21 +18,41 @@ const STATUS_META = {
 };
 const ORDER = ["needs_input", "working", "idle", "none"];
 
+// Pinned workspaces (cmux's own pin, toggled from the row menu) lead their
+// section, with a pin glyph and a faint yellow tint: the one system hue the
+// sections don't already use.
+const PIN = { color: "yellow", tint: "#FFD60A" };
+const isPinned = (w) => !!w.pinned;
+
 // automations/workspace-state.sh ends a workspace's description with this
 // invisible character while Claude's turn is finished and nothing has been
 // submitted since.
 const TURN_DONE = "\u2063";
 const turnDone = (w) => (w.description ?? "").endsWith(TURN_DONE);
 // Before that marker, after an invisible U+2064, it lists the model each of the
-// workspace's sessions last answered with: "<session id prefix>=<model id>"
-// pairs, since sidebar data doesn't carry the model.
+// workspace's sessions last answered with and when you last prompted it:
+// "<session id prefix>=<model id>@<epoch>" pairs, since sidebar data doesn't
+// carry the model, and its latest prompt is often a subagent hand-back.
 const MODELS = "\u2064";
-const summaryOf = (w) => (w.description ?? "").replace(/\u2063+$/, "").split(MODELS)[0];
-function modelOf(w, a) {
-  const pairs = (w.description ?? "").replace(/\u2063+$/, "").split(MODELS)[1] ?? "";
+// Last, after an invisible U+2062, Claude's plan usage (see usage below).
+const USAGE = "\u2062";
+const body = (w) => (w.description ?? "").replace(/\u2063+$/, "").split(USAGE)[0];
+const summaryOf = (w) => body(w).split(MODELS)[0];
+// Status pings land in the summary too (see workspace-state.sh). They only
+// hold while the session waits on you, and answering a question or permission
+// mid-turn fires no hook that could clear them, so they're hidden otherwise.
+const PING = /^(Claude is waiting for your input|Claude needs your permission.*|Agent is asking a question)$/;
+const isPing = (text) => PING.test(text.trim());
+function sessionPair(w, a) {
+  const pairs = body(w).split(MODELS)[1] ?? "";
   const pair = pairs.split(" ").find((p) => p.startsWith(a.id.slice(0, 8) + "="));
-  return pair ? modelLabel(pair.slice(pair.indexOf("=") + 1)) : "";
+  return pair ? pair.slice(pair.indexOf("=") + 1).split("@") : null;
 }
+function modelOf(w, a) {
+  const model = sessionPair(w, a)?.[0];
+  return model ? modelLabel(model) : "";
+}
+const promptedAt = (w, a) => feedNum(Number(sessionPair(w, a)?.[1] ?? NaN));
 
 // claude-opus-5-5 -> Opus 5.5, claude-sonnet-4-5-20250929 -> Sonnet 4.5.
 // Anything else shows as-is.
@@ -49,17 +69,82 @@ function modelLabel(id) {
 // at it. A real permission prompt or question mid-turn also stays there after
 // you've looked, until you answer it. cmux reports Claude's idle reminder
 // (about a minute after a turn ends) as needs_input too; once the turn has
-// finished and been read, that is just idle. Other statuses pass through;
-// ended sessions are the leftovers of /clear (the same Claude process carries
-// on as a new session with its own row), and have no section, so they are dropped.
+// finished and been read, that is just idle. A session whose own turn has
+// ended while background subagents it launched are still running is WORKING,
+// not INBOX: the work isn't done, and their hand-backs end in a turn of its own
+// that lands in INBOX when they finish. A real question still wins. Other
+// statuses pass through; ended sessions are the leftovers of /clear (the same
+// Claude process carries on as a new session with its own row), and have no
+// section, so they are dropped.
+const runningChildren = (a) => (a.children ?? []).filter((c) => c.running);
 function boardStatus(w, a) {
   if (a.status !== "idle" && a.status !== "needs_input") return a.status;
-  if ((w.unread ?? 0) > 0) return "needs_input";
   if (a.status === "needs_input" && !turnDone(w)) return "needs_input";
+  if (runningChildren(a).length > 0) return "working";
+  if ((w.unread ?? 0) > 0) return "needs_input";
   return "idle";
 }
 
 const epoch = () => data.clock()?.epoch ?? 0;
+
+// Claude's plan usage, the 5-hour session and 7-day limits /usage shows.
+// automations/record-usage.sh takes it from the statusline and
+// workspace-state.sh copies it into workspace descriptions as
+// "5h=<percent>@<reset epoch> 7d=<percent>@<reset epoch> t=<epoch recorded>".
+// It is account-wide, so the copy with the newest t wins. A window whose reset
+// has passed reads 0% until Claude reports again. Null before any is recorded.
+const usage = computed(() => {
+  let best = null;
+  for (const w of data.workspaces() ?? []) {
+    const raw = (w.description ?? "").replace(/\u2063+$/, "").split(USAGE)[1];
+    const m = raw?.match(/^5h=(\d+)@(\d+) 7d=(\d+)@(\d+) t=(\d+)$/);
+    if (m && (!best || +m[5] > best.t)) best = { t: +m[5], five: [+m[1], +m[2]], week: [+m[3], +m[4]] };
+  }
+  return best;
+});
+const usedPct = ([pct, resetsAt]) => (resetsAt && epoch() >= resetsAt ? 0 : pct);
+const usageColor = (pct) => (pct >= 90 ? "red" : pct >= 75 ? "orange" : "secondary");
+
+// "resets in 2h 14m" / "resets in 3d 4h", or "" once passed.
+function resetsIn(resetsAt) {
+  const s = resetsAt - epoch();
+  if (!resetsAt || s <= 0) return "";
+  const m = Math.floor(s / 60), h = Math.floor(m / 60), d = Math.floor(h / 24);
+  return "resets in " + (d > 0 ? d + "d " + (h % 24) + "h" : h > 0 ? h + "h " + (m % 60) + "m" : m + "m");
+}
+
+// Sits on the title row: an hourglass (the 5-hour session) and a calendar (the
+// week), each with its percentage over a thin meter line of
+// the same width, turning orange at 75% and red at 90%. Hover for when each
+// window resets. Every shape has a fixed size so the row stays text height.
+const METER = 40;
+const METER_HEX = { gray: "#8E8E93", orange: "#FF9F0A", red: "#FF453A" };
+function usageLine() {
+  const part = (symbol, pick) => {
+    const pct = () => Math.min(100, usedPct(pick(usage())));
+    const level = () => (pct() >= 90 ? "red" : pct() >= 75 ? "orange" : "gray");
+    return VStack({ spacing: 1, alignment: "leading" }, [
+      HStack({ spacing: 2 }, [
+        Image(symbol).font(8).color(() => usageColor(pct())),
+        Text(() => pct() + "%").font(9).monospaced().color(() => usageColor(pct())),
+      ]).frame({ width: METER, alignment: "leading" }),
+      ZStack({ alignment: "leading" }, [
+        Rectangle().fill("#8E8E9326").frame({ width: METER, height: 2 }),
+        Rectangle().fill(() => METER_HEX[level()])
+          .frame(() => ({ width: Math.round((METER * pct()) / 100), height: 2 })),
+      ]).cornerRadius(1).fixedSize(),
+    ]).fixedSize();
+  };
+  const tip = () => {
+    const u = usage();
+    const line = (name, w) => name + " " + usedPct(w) + "% used" + (resetsIn(w[1]) ? ", " + resetsIn(w[1]) : "");
+    return line("Session (5h):", u.five) + "\n" + line("Week (7d):", u.week);
+  };
+  return when(() => !!usage(), () => HStack({ spacing: 8 }, [
+    part("hourglass", (u) => u.five),
+    part("calendar", (u) => u.week),
+  ]).help(tip));
+}
 
 // Working rows swap the status dot for a braille spinner that steps on the
 // one-second clock (the native ProgressView ignores size and draws full-size).
@@ -94,10 +179,12 @@ const allAgents = computed(() => {
     }
     if (out.length === before) out.push({ key: w.id, ws: w, a: null, status: "none" });
   }
-  // Within a section, rows follow workspace order (the ⌘1-⌘9 order), so a
-  // row's hotkey matches its position. Never resort on activity; rows update
-  // in place. Sessions in the same workspace fall back to their key.
-  out.sort((x, y) => (x.ws.index ?? 0) - (y.ws.index ?? 0) || (x.key < y.key ? -1 : 1));
+  // Within a section, pinned workspaces come first, then rows follow
+  // workspace order (the ⌘1-⌘9 order), so a row's hotkey matches its
+  // position. Never resort on activity; rows update in place. Sessions in the
+  // same workspace fall back to their key.
+  out.sort((x, y) => (isPinned(y.ws) ? 1 : 0) - (isPinned(x.ws) ? 1 : 0)
+    || (x.ws.index ?? 0) - (y.ws.index ?? 0) || (x.key < y.key ? -1 : 1));
   return out;
 });
 
@@ -131,6 +218,7 @@ const prColor = (p) => (typeof p === "string" ? "secondary" : PR_COLORS[p.status
 // Prompts arrive raw: pasted text is wrapped in <pasted_content ...> and
 // subagent hand-backs in <agent-message ...>. Drop the tags (and the hand-back
 // boilerplate, which is not something you typed) so only readable text remains.
+const HAND_BACK = /^\s*<(agent-message|task-notification)\b/;
 function cleanPrompt(text) {
   if (!text) return "";
   if (/^\s*<agent-message\b/.test(text)) return "(subagent report)";
@@ -158,11 +246,27 @@ function chip(label, color, onTap) {
 // that has since exited.
 function details(e) {
   const ws = () => e().ws;
-  const summary = () => (e().a ? summaryOf(ws()) : "");
+  const summary = () => {
+    const text = e().a ? summaryOf(ws()) : "";
+    return isPing(text) && e().status !== "needs_input" ? "" : text;
+  };
   const prompt = () => (e().a ? cleanPrompt(ws().latestPrompt) : "");
   const prs = () => ws().prs ?? (ws().pr ? [ws().pr] : []);
-  const runningFor = () => (e().status === "working" && e().a?.sinceEpoch
-    ? fmtElapsed(epoch() - e().a.sinceEpoch) : "");
+  // A run counts from the prompt you typed, through the turns its subagents'
+  // hand-backs start (each a "prompt" of its own, resetting sinceEpoch). The
+  // transcript time of your prompt only counts once a hand-back follows it:
+  // at your own prompt the automation may still hold the one before. Without
+  // either, a session working only through background subagents counts from
+  // the oldest one still running.
+  const workingSince = () => {
+    const a = e().a, p = lastPrompt(ws(), a), you = promptedAt(ws(), a);
+    const own = a.status === "working" ? a.sinceEpoch
+      : Math.min(...runningChildren(a).map((c) => c.startedEpoch ?? Infinity));
+    if (p && !HAND_BACK.test(p.raw)) return Math.min(p.at, own ?? Infinity);
+    return p && you !== null && you <= p.at ? Math.min(you, own ?? Infinity) : own;
+  };
+  const runningFor = () => (e().status === "working" && Number.isFinite(workingSince())
+    ? fmtElapsed(epoch() - workingSince()) : "");
   // The clear circle mirrors the status dot so details line up under the title.
   return HStack({ spacing: 8, alignment: "top" }, [
     Circle({ size: 7 }).fill("clear"),
@@ -226,6 +330,7 @@ function row(e, strong, tint) {
         // The model sits after the title and outranks it, so a long title
         // truncates before the model does.
         when(() => editingKey() !== e().key, () => HStack({ spacing: 6 }, [
+          when(() => isPinned(e().ws), () => Image("pin.fill").font(9).color(PIN.color)),
           Text(() => e().ws.title + (tabNumber(e()) ? " [^" + tabNumber(e()) + "]" : ""))
             .font(12).weight(strong ? "semibold" : "regular")
             .lineLimit(1).truncation("tail"),
@@ -234,7 +339,7 @@ function row(e, strong, tint) {
         ])),
         when(() => editingKey() === e().key, () => renameField(e)),
         when(() => !!e().a, () => Text(() => {
-          const running = (e().a.children ?? []).filter((c) => c.running).length;
+          const running = runningChildren(e().a).length;
           return (cleanPrompt(e().a.title) || e().a.name) + (running ? " · " + running + " sub" : "");
         })
           .font(10).color("tertiary").lineLimit(1).truncation("tail")),
@@ -265,8 +370,9 @@ function row(e, strong, tint) {
     // it lightens the sidebar behind it and the text keeps its contrast: an
     // opaque light fill under the sidebar's light text makes rows unreadable.
     // Unselected rows stay clear so tinted rows match their section's tint
-    // instead of stacking a darker band over it.
-    .background(() => (e().ws.selected ? tint + "4d" : null))
+    // instead of stacking a darker band over it; pinned ones take a faint
+    // yellow instead.
+    .background(() => (e().ws.selected ? tint + "4d" : isPinned(e().ws) ? PIN.tint + "1f" : null))
     .hoverBackground(tint + "2e")
     .frame({ maxWidth: "infinity" })
     .onTap((mods) => jump(e(), mods?.option || mods?.cmd))
@@ -293,14 +399,16 @@ function renameField(e) {
   }).font(12);
 }
 
-// Right-click offers the agent's tab (same as Option/Command-click), renames the
-// workspace, and toggles its unread state, which is what files its sessions
+// Right-click offers the agent's tab (same as Option/Command-click), pins and
+// renames the workspace, and toggles its unread state, which is what files its sessions
 // under INBOX. cmux tracks unread per workspace, not per session. AGENTLESS rows
 // have no agent tab; a row's key fixes which kind it is, so this is read once.
 function rowMenu(e) {
   const unread = () => (e().ws.unread ?? 0) > 0;
   return [
     ...(e().a ? [Button("Go to Agent Tab", () => jump(e(), true))] : []),
+    Button(() => (isPinned(e().ws) ? "Unpin Workspace" : "Pin Workspace"), () =>
+      cmux("workspace.action", { action: isPinned(e().ws) ? "unpin" : "pin", workspace_id: e().ws.id })),
     Button("Rename Workspace", () => setEditingKey(e().key)),
     Button(() => (unread() ? "Mark as Read" : "Mark as Unread"), () =>
       cmux("workspace.action", { action: unread() ? "mark_read" : "mark_unread", workspace_id: e().ws.id })),
@@ -393,7 +501,7 @@ function hhmm(t) {
 // before that the description still holds the previous turn's summary. A
 // question mid-turn replaces the description (the notification rule), so it
 // shows once it differs from what was there.
-const turnDetail = (w) => (turnDone(w) ? summaryOf(w).trim() : "");
+const turnDetail = (w) => (turnDone(w) && !isPing(summaryOf(w)) ? summaryOf(w).trim() : "");
 const promptDetail = (w) => cleanPrompt(w.latestPrompt);
 const askDetail = (w) => {
   const base = summaryOf(w);
@@ -415,8 +523,8 @@ function feedEvent(t, w, kind, verb, detail, refresh) {
 function lastPrompt(w, a) {
   const tab = feedList(w.tabs).find((t) =>
     (a.panelId && t.id === a.panelId) || (a.surfaceId && t.surfaceId === a.surfaceId));
-  if (tab && feedNum(tab.latestAt) !== null) return { at: tab.latestAt, text: cleanPrompt(tab.latestPrompt) };
-  if (feedNum(w.latestAt) !== null && feedLive(w).length === 1) return { at: w.latestAt, text: cleanPrompt(w.latestPrompt) };
+  if (tab && feedNum(tab.latestAt) !== null) return { at: tab.latestAt, raw: tab.latestPrompt ?? "", text: cleanPrompt(tab.latestPrompt) };
+  if (feedNum(w.latestAt) !== null && feedLive(w).length === 1) return { at: w.latestAt, raw: w.latestPrompt ?? "", text: cleanPrompt(w.latestPrompt) };
   return null;
 }
 
@@ -592,7 +700,11 @@ function feedSection() {
 
 sidebar(() =>
   VStack({ spacing: 10 }, [
-    Text("Agent Inbox").font(14).weight("semibold").paddingHorizontal(10),
+    HStack({ spacing: 6 }, [
+      Text("Agent Inbox").font(14).weight("semibold"),
+      Spacer({ minLength: 0 }),
+      usageLine(),
+    ]).paddingHorizontal(10),
     ...ORDER.map(statusSection),
     feedSection(),
     Spacer(),

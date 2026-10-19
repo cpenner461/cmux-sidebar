@@ -32,9 +32,13 @@ const ws = (o) => ({ id: "w1", title: "cycle-status-board", ...o,
   tabs: [{ id: "p0", surfaceId: "s0", title: "zsh" }, { id: "p1", surfaceId: "s1", title: "claude" }],
   agents: [{ id: "a1", kind: "claude", name: "Claude", status: "needs_input", title: "Fix board", lastActivityAt: 900, surfaceId: "s1", panelId: "p1" }] });
 console.log("== full data (object PRs)");
-set("workspaces", [ws({ description: "I've switched the Status tab to the GitHub App.\u2064a1=claude-opus-5-5 zz999999=claude-sonnet-4-5-20250929\u2063",
+set("workspaces", [ws({ description: "I've switched the Status tab to the GitHub App.\u2064a1=claude-opus-5-5 zz999999=claude-sonnet-4-5-20250929\u20625h=7@9000 7d=82@600000 t=990\u2063",
   latestPrompt: '<pasted_content id="d12e"> Write the plan for <b>plan 4</b> </pasted_content>', branch: "cycle-status-board", dirty: true,
   prs: [{ number: 32, url: "https://github.com/x/y/pull/32", status: "open" }], ports: [4001, 56197] })]);
+dump(root);
+console.log("== usage: newest copy wins; a passed reset reads 0%");
+set("workspaces", [ws({ description: "Old.\u20625h=50@9000 7d=95@600000 t=100" }),
+  { ...ws({ description: "\u2064a1=claude-opus-5-5\u20625h=93@500 7d=20@600000 t=990\u2063" }), id: "w9" }]);
 dump(root);
 console.log("== string PRs, no message, no branch");
 set("workspaces", [ws({ latestPrompt: '<agent-message from="abc"> [Subagent hand-back] ...', prs: ["https://github.com/x/y/pull/7"], ports: [] })]);
@@ -61,6 +65,48 @@ set("workspaces", [
   { id: "w6", index: 0, title: "has-agent", agents: [{ id: "a8", name: "Claude", status: "idle", lastActivityAt: 900 }] },
   { id: "w7", index: 1, title: "empty-shell", branch: "main", description: "Old summary.\u2063", latestPrompt: "old prompt", selected: true, tabs: [{ id: "p2", title: "zsh" }] },
   { id: "w8", index: 2, title: "only-cleared", agents: [{ id: "a9", name: "Old", status: "ended", lastActivityAt: 100 }] },
+]);
+dump(root);
+console.log("== background subagents still running: WORKING even when unread; a real question still INBOX");
+set("workspaces", [
+  { id: "w13", index: 0, title: "bg-agents", description: "Launched 5.\u2063", unread: 1,
+    agents: [{ id: "c1", name: "Claude", status: "idle", sinceEpoch: 700, lastActivityAt: 700,
+      children: [{ id: "k1", running: true, startedEpoch: 640 }, { id: "k2", running: false, startedEpoch: 600 }] }] },
+  { id: "w14", index: 1, title: "bg-but-asking", description: "Question?", unread: 1,
+    agents: [{ id: "c2", name: "Claude", status: "needs_input", lastActivityAt: 900,
+      children: [{ id: "k3", running: true, startedEpoch: 640 }] }] },
+  { id: "w15", index: 2, title: "bg-done", description: "All back.\u2063", unread: 1,
+    agents: [{ id: "c3", name: "Claude", status: "idle", lastActivityAt: 900, children: [{ id: "k4", running: false }] }] },
+]);
+dump(root);
+console.log("== a run counts from your prompt across hand-back turns: running 16m 40s, 3m 20s, 1m 40s");
+const tabs = (at, prompt) => [{ id: "p9", surfaceId: "s9", title: "claude", latestAt: at, latestPrompt: prompt }];
+set("workspaces", [
+  { id: "w19", index: 0, title: "handed-back", description: "\u2064e1=claude-opus-5-5@0", tabs: tabs(950, '<agent-message from="abc"> ...'),
+    agents: [{ id: "e1", name: "Claude", status: "working", sinceEpoch: 950, lastActivityAt: 990, panelId: "p9" }] },
+  { id: "w20", index: 1, title: "stale-prompt-time", description: "\u2064e2=claude-opus-5-5@300", tabs: tabs(800, "you typed this"),
+    agents: [{ id: "e2", name: "Claude", status: "working", sinceEpoch: 800, lastActivityAt: 990, panelId: "p9" }] },
+  { id: "w21", index: 2, title: "bg-after-prompt", description: "\u2064e3=claude-opus-5-5@900\u2063", tabs: tabs(900, "launch some agents"),
+    agents: [{ id: "e3", name: "Claude", status: "idle", sinceEpoch: 960, lastActivityAt: 960, panelId: "p9",
+      children: [{ id: "k6", running: true, startedEpoch: 950 }] }] },
+]);
+dump(root);
+console.log("== status pings show only while the session waits: 'Agent is asking a question' on asked, nothing on answered/subagents");
+set("workspaces", [
+  { id: "w16", index: 0, title: "asked", description: "Agent is asking a question",
+    agents: [{ id: "d1", name: "Claude", status: "needs_input", lastActivityAt: 900 }] },
+  { id: "w17", index: 1, title: "answered", description: "Agent is asking a question",
+    agents: [{ id: "d2", name: "Claude", status: "working", sinceEpoch: 880, lastActivityAt: 900 }] },
+  { id: "w18", index: 2, title: "subagents", description: "Claude is waiting for your input⁣",
+    agents: [{ id: "d3", name: "Claude", status: "idle", lastActivityAt: 900,
+      children: [{ id: "k5", running: true, startedEpoch: 640 }] }] },
+]);
+dump(root);
+console.log("== pinned workspaces lead their section, with a pin");
+set("workspaces", [
+  { id: "w10", index: 0, title: "unpinned-idle", agents: [{ id: "b1", name: "Claude", status: "idle", lastActivityAt: 900 }] },
+  { id: "w11", index: 1, title: "pinned-idle", pinned: true, agents: [{ id: "b2", name: "Claude", status: "idle", lastActivityAt: 900 }] },
+  { id: "w12", index: 2, title: "plain-terminal", pinned: true },
 ]);
 dump(root);
 console.log("== tap every tappable node");
