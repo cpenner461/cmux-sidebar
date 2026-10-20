@@ -109,6 +109,17 @@ set("workspaces", [
   { id: "w12", index: 2, title: "plain-terminal", pinned: true },
 ]);
 dump(root);
+console.log("== compact: title line and branch only; tapping again restores the rest");
+set("workspaces", [ws({ description: "Summary.\u2064a1=claude-opus-5-5\u20625h=7@9000 7d=82@600000 t=990\u2063", branch: "main", prs: [{ number: 32, url: "https://github.com/x/y/pull/32", status: "open" }], ports: [4001] })]);
+const toggle = () => Object.keys(nodes).find((id) => nodes[id].type === "image" && /^arrow\./.test(nodes[id].props.systemName));
+ctx.__dispatch(toggle(), "tap", null);
+dump(root);
+console.log("== compact: the running time sits on the branch line, without 'running'");
+set("workspaces", [{ id: "w22", index: 0, title: "busy", branch: "a-very-long-feature-branch-name",
+  agents: [{ id: "f1", name: "Claude", status: "working", sinceEpoch: 813, lastActivityAt: 990 }] }]);
+dump(root);
+ctx.__dispatch(toggle(), "tap", null);
+dump(root);
 console.log("== tap every tappable node");
 for (const [id, n] of Object.entries(nodes)) if (n.props.tappable) ctx.__dispatch(id, "tap", null);
 console.log(JSON.stringify(actions));

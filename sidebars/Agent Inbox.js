@@ -117,7 +117,9 @@ function resetsIn(resetsAt) {
 // week), each with its percentage over a thin meter line of
 // the same width, turning orange at 75% and red at 90%. Hover for when each
 // window resets. Every shape has a fixed size so the row stays text height.
+// Compact mode narrows the meters to three quarters, about as tight as "100%" fits.
 const METER = 40;
+const meterWidth = () => (compact() ? 30 : METER);
 const METER_HEX = { gray: "#8E8E93", orange: "#FF9F0A", red: "#FF453A" };
 function usageLine() {
   const part = (symbol, pick) => {
@@ -127,11 +129,11 @@ function usageLine() {
       HStack({ spacing: 2 }, [
         Image(symbol).font(8).color(() => usageColor(pct())),
         Text(() => pct() + "%").font(9).monospaced().color(() => usageColor(pct())),
-      ]).frame({ width: METER, alignment: "leading" }),
+      ]).frame(() => ({ width: meterWidth(), alignment: "leading" })),
       ZStack({ alignment: "leading" }, [
-        Rectangle().fill("#8E8E9326").frame({ width: METER, height: 2 }),
+        Rectangle().fill("#8E8E9326").frame(() => ({ width: meterWidth(), height: 2 })),
         Rectangle().fill(() => METER_HEX[level()])
-          .frame(() => ({ width: Math.round((METER * pct()) / 100), height: 2 })),
+          .frame(() => ({ width: Math.round((meterWidth() * pct()) / 100), height: 2 })),
       ]).cornerRadius(1).fixedSize(),
     ]).fixedSize();
   };
@@ -236,6 +238,12 @@ function chip(label, color, onTap) {
     .onTap(onTap);
 }
 
+// Compact mode, toggled from the header, trims rows for a narrow sidebar to
+// the title line (status, title, model, hotkey, time), the branch, and the
+// running time of working rows, and cuts feed details to one line. Sidebars get no width and can't keep state, so it's a
+// manual switch that resets when cmux reloads the sidebar.
+const [compact, setCompact] = signal(false);
+
 // Workspace facts the stock sidebar shows: Claude's latest summary, your last
 // prompt, branch, PRs, ports. The summary is the workspace description, which
 // automations/workspace-state.sh keeps in sync with the latest notification
@@ -251,7 +259,8 @@ function details(e) {
     return isPing(text) && e().status !== "needs_input" ? "" : text;
   };
   const prompt = () => (e().a ? cleanPrompt(ws().latestPrompt) : "");
-  const prs = () => ws().prs ?? (ws().pr ? [ws().pr] : []);
+  const prs = () => (compact() ? [] : ws().prs ?? (ws().pr ? [ws().pr] : []));
+  const ports = () => (compact() ? [] : ws().ports ?? []);
   // A run counts from the prompt you typed, through the turns its subagents'
   // hand-backs start (each a "prompt" of its own, resetting sinceEpoch). The
   // transcript time of your prompt only counts once a hand-back follows it:
@@ -271,11 +280,13 @@ function details(e) {
   return HStack({ spacing: 8, alignment: "top" }, [
     Circle({ size: 7 }).fill("clear"),
     VStack({ spacing: 3, alignment: "leading" }, [
-      when(() => !!summary(), () => Text(summary)
+      when(() => !compact() && !!summary(), () => Text(summary)
         .font(11).color("secondary").lineLimit(2).truncation("tail")),
-      when(() => !!prompt(), () => Text(() => "› " + prompt())
+      when(() => !compact() && !!prompt(), () => Text(() => "› " + prompt())
         .font(10).color("tertiary").lineLimit(1).truncation("tail")),
-      when(() => !!ws().branch || prs().length > 0 || (ws().ports ?? []).length > 0,
+      // Compact rows put the running time at the end of the branch line, where it
+      // outranks the branch, so a long branch truncates before the time does.
+      when(() => !!ws().branch || prs().length > 0 || ports().length > 0 || (compact() && !!runningFor()),
         () => HStack({ spacing: 4 }, [
           when(() => !!ws().branch, () => HStack({ spacing: 3 }, [
             Image("arrow.triangle.branch").font(9).color("tertiary"),
@@ -285,16 +296,22 @@ function details(e) {
           ]).layoutPriority(1)),
           ForEach({ items: prs, key: (p) => prUrl(p) }, (p) =>
             chip(() => prText(p()), () => prColor(p()), () => openURL(prUrl(p())))),
-          ForEach({ items: () => ws().ports ?? [], key: (n) => String(n) }, (n) =>
+          ForEach({ items: ports, key: (n) => String(n) }, (n) =>
             chip(() => ":" + n(), "secondary", () => openURL("http://localhost:" + n()))),
           Spacer({ minLength: 0 }),
+          when(() => compact() && !!runningFor(), () => runningTime(runningFor, "")
+            .fixedSize().layoutPriority(3)),
         ])),
-      when(() => !!runningFor(), () => HStack({ spacing: 3 }, [
-        Image("timer").font(9).color(() => STATUS_META.working.color),
-        Text(() => "running " + runningFor())
-          .font(10).monospaced().color(() => STATUS_META.working.color),
-      ])),
+      when(() => !compact() && !!runningFor(), () => runningTime(runningFor, "running ")),
     ]),
+  ]);
+}
+
+function runningTime(runningFor, prefix) {
+  return HStack({ spacing: 3 }, [
+    Image("timer").font(9).color(() => STATUS_META.working.color),
+    Text(() => prefix + runningFor())
+      .font(10).monospaced().color(() => STATUS_META.working.color),
   ]);
 }
 
@@ -338,7 +355,7 @@ function row(e, strong, tint) {
             .font(10).color("secondary").lineLimit(1).layoutPriority(1)),
         ])),
         when(() => editingKey() === e().key, () => renameField(e)),
-        when(() => !!e().a, () => Text(() => {
+        when(() => !compact() && !!e().a, () => Text(() => {
           const running = runningChildren(e().a).length;
           return (cleanPrompt(e().a.title) || e().a.name) + (running ? " · " + running + " sub" : "");
         })
@@ -364,7 +381,7 @@ function row(e, strong, tint) {
     ]),
     details(e),
   ])
-    .paddingHorizontal(10).paddingVertical(6)
+    .paddingHorizontal(10).paddingVertical(() => (compact() ? 3 : 6))
     .cornerRadius(8)
     // The selected workspace gets a lighter background. Keep it translucent so
     // it lightens the sidebar behind it and the text keeps its contrast: an
@@ -636,29 +653,38 @@ computed(() => {
   return now;
 });
 
-const [feedLimit, setFeedLimit] = signal(FEED_ROWS);
+// Compact mode starts the feed at FEED_ROWS_COMPACT. The limit is kept as how
+// far past the default "show more" has gone, so toggling views keeps that.
+const FEED_ROWS_COMPACT = 5;
+const feedRows = () => (compact() ? FEED_ROWS_COMPACT : FEED_ROWS);
+const [feedExtra, setFeedExtra] = signal(0);
+const feedLimit = () => feedRows() + feedExtra();
+const setFeedLimit = (n) => setFeedExtra(Math.max(0, n - feedRows()));
 const feedShown = computed(() => feedEvents().slice(-feedLimit()).reverse());
 const feedOlder = () => Math.max(0, feedEvents().length - feedLimit());
 const [feedOpen, setFeedOpen] = signal(true);
 
 // The feed starts short; "show more" steps back FEED_STEP events at a time
-// through what's held, and "show less" returns to FEED_ROWS.
+// through what's held, and "show less" returns to feedRows().
 function moreLine(older, limit, setLimit) {
   return HStack({ spacing: 10 }, [
     when(() => older() > 0, () => Text(() => "show " + Math.min(FEED_STEP, older()) + " more (" + older() + " older)")
-      .font(10).color("secondary").paddingHorizontal(5).paddingVertical(1).cornerRadius(5)
+      .font(10).color("secondary").lineLimit(1).truncation("tail")
+      .paddingHorizontal(5).paddingVertical(1).cornerRadius(5)
       .hoverBackground("#7f7f7f3d").onTap(() => setLimit(limit() + FEED_STEP))),
-    when(() => limit() > FEED_ROWS, () => Text("show less")
-      .font(10).color("tertiary").paddingHorizontal(5).paddingVertical(1).cornerRadius(5)
-      .hoverBackground("#7f7f7f3d").onTap(() => setLimit(FEED_ROWS))),
-    Spacer({ minLength: 0 }),
-  ]).paddingHorizontal(5);
+    when(() => limit() > feedRows(), () => Text("show less")
+      .font(10).color("tertiary").lineLimit(1).fixedSize().paddingHorizontal(5).paddingVertical(1).cornerRadius(5)
+      .hoverBackground("#7f7f7f3d").onTap(() => setLimit(feedRows()))),
+  // No Spacer: the links sit in when() groups, which don't pass on their
+  // layoutPriority, so a Spacer would take half the row. Pin left instead.
+  ]).paddingHorizontal(5).frame({ maxWidth: "infinity", alignment: "leading" });
 }
 
 function feedRow(e) {
   const kind = () => FEED_KIND[e().kind] ?? FEED_KIND.session;
   return HStack({ spacing: 6, alignment: "top" }, [
-    Text(() => hhmm(e().t)).font(10).monospaced().color("tertiary").lineLimit(1).fixedSize(),
+    // Compact mode drops the timestamp column.
+    when(() => !compact(), () => Text(() => hhmm(e().t)).font(10).monospaced().color("tertiary").lineLimit(1).fixedSize()),
     Text(() => kind().glyph).font(10).monospaced().color(() => kind().color)
       .frame({ width: 10, alignment: "center" }),
     VStack({ spacing: 1, alignment: "leading" }, [
@@ -667,7 +693,7 @@ function feedRow(e) {
         Text(() => e().verb).font(11).color("secondary").lineLimit(1).truncation("tail").layoutPriority(1),
       ]),
       when(() => !!e().detail, () => Text(() => e().detail)
-        .font(10).color("tertiary").lineLimit(2).truncation("tail")),
+        .font(10).color("tertiary").lineLimit(() => (compact() ? 1 : 2)).truncation("tail")),
     ]).layoutPriority(1),
     Spacer({ minLength: 0 }),
   ])
@@ -682,10 +708,11 @@ function feedRow(e) {
 function feedSection() {
   return VStack({ spacing: 3 }, [
     HStack({ spacing: 6 }, [
-      Text(() => (feedOpen() ? "" : "▸ ") + FEED_META.label).font(10).weight("semibold").color(FEED_META.color),
+      Text(() => (feedOpen() ? "" : "▸ ") + FEED_META.label).font(10).weight("semibold").color(FEED_META.color)
+        .lineLimit(1).truncation("tail"),
       Spacer(),
       Text(() => (feedEvents().length ? "since " + hhmm(feedEvents()[0].t) : ""))
-        .font(10).monospaced().color("tertiary"),
+        .font(10).monospaced().color("tertiary").lineLimit(1).fixedSize(),
     ]).paddingHorizontal(10).frame({ maxWidth: "infinity" }).onTap(() => setFeedOpen(!feedOpen())),
     when(feedOpen, () => VStack({ spacing: 0 }, [
       ForEach({ items: feedShown, key: (e) => String(e.id) }, feedRow),
@@ -699,11 +726,15 @@ function feedSection() {
 }
 
 sidebar(() =>
-  VStack({ spacing: 10 }, [
+  VStack({ spacing: () => (compact() ? 6 : 10) }, [
     HStack({ spacing: 6 }, [
-      Text("Agent Inbox").font(14).weight("semibold"),
+      Text("Agent Inbox").font(14).weight("semibold").lineLimit(1),
       Spacer({ minLength: 0 }),
       usageLine(),
+      Image(() => (compact() ? "arrow.up.left.and.arrow.down.right" : "arrow.down.right.and.arrow.up.left"))
+        .font(10).color(() => (compact() ? "blue" : "secondary"))
+        .help(() => (compact() ? "Show details" : "Compact view"))
+        .onTap(() => setCompact(!compact())),
     ]).paddingHorizontal(10),
     ...ORDER.map(statusSection),
     feedSection(),
