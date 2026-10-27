@@ -52,6 +52,15 @@ function modelOf(w, a) {
   const model = sessionPair(w, a)?.[0];
   return model ? modelLabel(model) : "";
 }
+// Keep the tool visible even when a session has its own title or compact mode
+// hides that title. cmux supplies the tool slug as kind; older data has name.
+function toolLabel(a) {
+  return ({ codex: "Codex", claude: "Claude" })[a.kind] || a.name || a.kind || "Agent";
+}
+function agentLabel(w, a) {
+  const model = modelOf(w, a);
+  return toolLabel(a) + (model ? " · " + model : "");
+}
 const promptedAt = (w, a) => feedNum(Number(sessionPair(w, a)?.[1] ?? NaN));
 
 // claude-opus-5-5 -> Opus 5.5, claude-sonnet-4-5-20250929 -> Sonnet 4.5.
@@ -344,14 +353,14 @@ function row(e, strong, tint) {
       // Truncating text only outranks a Spacer on its own; wrapped in a stack
       // it ties with the Spacer and the two split the row, so raise the stack.
       VStack({ spacing: 1, alignment: "leading" }, [
-        // The model sits after the title and outranks it, so a long title
-        // truncates before the model does.
+        // The tool and model sit after the title and outrank it, so a long
+        // title truncates before the agent label does.
         when(() => editingKey() !== e().key, () => HStack({ spacing: 6 }, [
           when(() => isPinned(e().ws), () => Image("pin.fill").font(9).color(PIN.color)),
           Text(() => e().ws.title + (tabNumber(e()) ? " [^" + tabNumber(e()) + "]" : ""))
             .font(12).weight(strong ? "semibold" : "regular")
             .lineLimit(1).truncation("tail"),
-          when(() => !!(e().a && modelOf(e().ws, e().a)), () => Text(() => modelOf(e().ws, e().a))
+          when(() => !!e().a, () => Text(() => agentLabel(e().ws, e().a))
             .font(10).color("secondary").lineLimit(1).layoutPriority(1)),
         ])),
         when(() => editingKey() === e().key, () => renameField(e)),

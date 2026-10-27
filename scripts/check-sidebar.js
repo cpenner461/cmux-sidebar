@@ -3,6 +3,7 @@
 // workspaces, prints the rendered text tree, and taps every tappable node.
 //   node scripts/check-sidebar.js "sidebars/Agent Inbox.js"
 const fs = require("fs"), vm = require("vm");
+const assert = require("node:assert/strict");
 const runtimePath = process.env.CMUX_SIDEBAR_RUNTIME ??
   "/Applications/cmux.app/Contents/Resources/CmuxSwiftRenderUI_CmuxSwiftRenderUI.bundle/Contents/Resources/SidebarRuntime.js";
 const sidebarPath = process.argv[2];
@@ -27,7 +28,34 @@ const dump = (id, d = 0) => { const n = nodes[id]; if (!n) return;
   if (n.type === "text" || n.type === "image") console.log("  ".repeat(d) + n.type + " " + (t || n.props.systemName) + (n.props.color ? " [" + n.props.color + "]" : "") + (n.props.tappable ? " (tap)" : ""));
   n.children.forEach((c) => dump(c, d + (n.type === "group" ? 0 : 1))); };
 const set = (k, v) => ctx.__setData(k, JSON.stringify(v));
+const renderedText = (id = root) => {
+  const n = nodes[id];
+  return n ? [n.props.text, ...n.children.flatMap((c) => renderedText(c))].filter((s) => s !== undefined) : [];
+};
 set("clock", { epoch: 1000 });
+console.log("== tool labels survive session titles and compact mode");
+set("workspaces", [{ id: "codex-w", index: 0, title: "codex-project",
+  tabs: [{ id: "codex-p", title: "terminal" }],
+  agents: [{ id: "codex-a", kind: "codex", name: "Agent", title: "Fix the sidebar", status: "working", sinceEpoch: 900, panelId: "codex-p" },
+    { id: "claude-a", kind: "claude", name: "Claude", title: "Review the sidebar", status: "idle" }] }]);
+assert.ok(renderedText().includes("Codex"), "a titled Codex session must still identify its tool");
+assert.ok(renderedText().includes("Claude"), "mixed workspaces must distinguish Claude sessions");
+const compactToggle = () => Object.keys(nodes).find((id) => nodes[id].type === "image" && /^arrow\./.test(nodes[id].props.systemName));
+ctx.__dispatch(compactToggle(), "tap", null);
+assert.ok(renderedText().includes("Codex"), "compact mode must retain the tool label");
+assert.ok(!renderedText().includes("Fix the sidebar"));
+ctx.__dispatch(compactToggle(), "tap", null);
+console.log("== Codex model metadata renders and refreshes in compact mode");
+const codexWorkspace = (model) => ({ id: "codex-model-w", title: "codex-model-project",
+  description: "\u2064codex123=" + model,
+  agents: [{ id: "codex123-rest", kind: "codex", name: "Codex", title: "Fix sidebar", status: "idle" }] });
+set("workspaces", [codexWorkspace("gpt-6.1-sol")]);
+assert.ok(renderedText().includes("Codex · gpt-6.1-sol"));
+ctx.__dispatch(compactToggle(), "tap", null);
+set("workspaces", [codexWorkspace("gpt-6.1-terra")]);
+assert.ok(renderedText().includes("Codex · gpt-6.1-terra"));
+assert.ok(!renderedText().includes("Codex · gpt-6.1-sol"));
+ctx.__dispatch(compactToggle(), "tap", null);
 const ws = (o) => ({ id: "w1", title: "cycle-status-board", ...o,
   tabs: [{ id: "p0", surfaceId: "s0", title: "zsh" }, { id: "p1", surfaceId: "s1", title: "claude" }],
   agents: [{ id: "a1", kind: "claude", name: "Claude", status: "needs_input", title: "Fix board", lastActivityAt: 900, surfaceId: "s1", panelId: "p1" }] });
@@ -35,6 +63,7 @@ console.log("== full data (object PRs)");
 set("workspaces", [ws({ description: "I've switched the Status tab to the GitHub App.\u2064a1=claude-opus-5-5 zz999999=claude-sonnet-4-5-20250929\u20625h=7@9000 7d=82@600000 t=990\u2063",
   latestPrompt: '<pasted_content id="d12e"> Write the plan for <b>plan 4</b> </pasted_content>', branch: "cycle-status-board", dirty: true,
   prs: [{ number: 32, url: "https://github.com/x/y/pull/32", status: "open" }], ports: [4001, 56197] })]);
+assert.ok(renderedText().includes("Claude · Opus 5.5"), "the tool label must preserve the recorded model");
 dump(root);
 console.log("== usage: newest copy wins; a passed reset reads 0%");
 set("workspaces", [ws({ description: "Old.\u20625h=50@9000 7d=95@600000 t=100" }),

@@ -10,8 +10,8 @@
 #      permission prompt or question; the marker lets Agent Inbox tell them
 #      apart.
 #   3. Between the two, after an invisible separator (U+2064), the model each
-#      of the workspace's Claude sessions last answered with and when you last
-#      prompted it, as "<first 8 chars of session id>=<model id>@<epoch>"
+#      of the workspace's Claude or Codex sessions used and, for Claude, when
+#      you last prompted it, as "<first 8 chars of session id>=<model id>@<epoch>"
 #      pairs. Hooks and sidebar data don't carry the model, and every subagent
 #      hand-back starts a turn that looks like a new prompt, so both come from
 #      each session's transcript, refreshed on every run. Agent Inbox times a
@@ -73,12 +73,22 @@ USAGE_SEP="$(printf '\xe2\x81\xa2')"
 # background task notices "task-notification"). "<synthetic>" entries don't
 # start with "claude-", and quotes inside tool input or prompts are escaped,
 # so neither pattern matches inside them.
+# Codex records the selected model in turn_context.payload.model. Read the
+# latest context rather than session defaults so model switches are reflected.
 session_models() {
   cmux sessions list --json |
     jq -r --arg ws "$ws" '.sessions[]
-      | select(.agent == "claude" and (.workspace_id | ascii_downcase) == ($ws | ascii_downcase) and .transcript_path != null)
-      | "\(.session_id)\t\(.transcript_path)"' |
-    while IFS=$'\t' read -r sid transcript; do
+      | select((.agent == "claude" or .agent == "codex") and (.workspace_id | ascii_downcase) == ($ws | ascii_downcase) and .transcript_path != null)
+      | "\(.agent)\t\(.session_id)\t\(.transcript_path)"' |
+    while IFS=$'\t' read -r agent sid transcript; do
+      if [ "$agent" = codex ]; then
+        model="$(jq -Rn -r '
+          reduce (inputs | fromjson? | select(.type == "turn_context")
+            | .payload.model | select(type == "string" and length > 0)) as $model
+            (""; $model)' "$transcript" 2>/dev/null || true)"
+        if [ -n "$model" ]; then printf '%s=%s ' "${sid:0:8}" "$model"; fi
+        continue
+      fi
       model="$( (tail -r "$transcript" 2>/dev/null || true) | grep -m1 '"message":{"model":"claude-' | jq -r '.message.model // empty' || true)"
       asked="$( (tail -r "$transcript" 2>/dev/null || true) | grep -m1 '"origin":{"kind":"human"' |
         jq -r 'select(.type == "user") | .timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdate' 2>/dev/null || true)"
