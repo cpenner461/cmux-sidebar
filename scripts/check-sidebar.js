@@ -120,6 +120,15 @@ set("workspaces", [
       children: [{ id: "k6", running: true, startedEpoch: 950 }] }] },
 ]);
 dump(root);
+console.log("== background shells still running: WORKING from the oldest shell, running 6m 40s; the model still reads");
+set("workspaces", [
+  { id: "w22", index: 0, title: "bg-shell", description: "Started the run.⁤f1=claude-opus-5-5~600,800⁣", unread: 1,
+    agents: [{ id: "f1", name: "Claude", status: "idle", sinceEpoch: 610, lastActivityAt: 610 }] },
+]);
+dump(root);
+assert.ok(renderedText().includes("WORKING") && renderedText().includes("running 6m 40s"));
+assert.ok(renderedText().some((t) => /· 2 shell$/.test(t)), "the row must count running shells");
+assert.ok(renderedText().includes("Claude · Opus 5.5"), "the shell list must not break the model");
 console.log("== status pings show only while the session waits: 'Agent is asking a question' on asked, nothing on answered/subagents");
 set("workspaces", [
   { id: "w16", index: 0, title: "asked", description: "Agent is asking a question",

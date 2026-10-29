@@ -32,7 +32,9 @@ const turnDone = (w) => (w.description ?? "").endsWith(TURN_DONE);
 // Before that marker, after an invisible U+2064, it lists the model each of the
 // workspace's sessions last answered with and when you last prompted it:
 // "<session id prefix>=<model id>@<epoch>" pairs, since sidebar data doesn't
-// carry the model, and its latest prompt is often a subagent hand-back.
+// carry the model, and its latest prompt is often a subagent hand-back. A
+// Claude session with background shells still running adds "~<epoch>,..."
+// for when each started: sidebar data reports such a session as idle.
 const MODELS = "\u2064";
 // Last, after an invisible U+2062, Claude's plan usage (see usage below).
 const USAGE = "\u2062";
@@ -43,10 +45,15 @@ const summaryOf = (w) => body(w).split(MODELS)[0];
 // mid-turn fires no hook that could clear them, so they're hidden otherwise.
 const PING = /^(Claude is waiting for your input|Claude needs your permission.*|Agent is asking a question)$/;
 const isPing = (text) => PING.test(text.trim());
-function sessionPair(w, a) {
+function sessionEntry(w, a) {
   const pairs = body(w).split(MODELS)[1] ?? "";
   const pair = pairs.split(" ").find((p) => p.startsWith(a.id.slice(0, 8) + "="));
-  return pair ? pair.slice(pair.indexOf("=") + 1).split("@") : null;
+  return pair ? pair.slice(pair.indexOf("=") + 1).split("~") : null;
+}
+const sessionPair = (w, a) => sessionEntry(w, a)?.[0].split("@") ?? null;
+function runningShells(w, a) {
+  const since = sessionEntry(w, a)?.[1];
+  return since ? since.split(",").map(Number).filter(Number.isFinite) : [];
 }
 function modelOf(w, a) {
   const model = sessionPair(w, a)?.[0];
@@ -79,9 +86,9 @@ function modelLabel(id) {
 // you've looked, until you answer it. cmux reports Claude's idle reminder
 // (about a minute after a turn ends) as needs_input too; once the turn has
 // finished and been read, that is just idle. A session whose own turn has
-// ended while background subagents it launched are still running is WORKING,
-// not INBOX: the work isn't done, and their hand-backs end in a turn of its own
-// that lands in INBOX when they finish. A real question still wins. Other
+// ended while background subagents or shells it launched are still running is
+// WORKING, not INBOX: the work isn't done, and their hand-backs end in a turn of
+// its own that lands in INBOX when they finish. A real question still wins. Other
 // statuses pass through; ended sessions are the leftovers of /clear (the same
 // Claude process carries on as a new session with its own row), and have no
 // section, so they are dropped.
@@ -89,7 +96,7 @@ const runningChildren = (a) => (a.children ?? []).filter((c) => c.running);
 function boardStatus(w, a) {
   if (a.status !== "idle" && a.status !== "needs_input") return a.status;
   if (a.status === "needs_input" && !turnDone(w)) return "needs_input";
-  if (runningChildren(a).length > 0) return "working";
+  if (runningChildren(a).length > 0 || runningShells(w, a).length > 0) return "working";
   if ((w.unread ?? 0) > 0) return "needs_input";
   return "idle";
 }
@@ -274,12 +281,12 @@ function details(e) {
   // hand-backs start (each a "prompt" of its own, resetting sinceEpoch). The
   // transcript time of your prompt only counts once a hand-back follows it:
   // at your own prompt the automation may still hold the one before. Without
-  // either, a session working only through background subagents counts from
-  // the oldest one still running.
+  // either, a session working only through background subagents or shells
+  // counts from the oldest one still running.
   const workingSince = () => {
     const a = e().a, p = lastPrompt(ws(), a), you = promptedAt(ws(), a);
     const own = a.status === "working" ? a.sinceEpoch
-      : Math.min(...runningChildren(a).map((c) => c.startedEpoch ?? Infinity));
+      : Math.min(...runningChildren(a).map((c) => c.startedEpoch ?? Infinity), ...runningShells(ws(), a));
     if (p && !HAND_BACK.test(p.raw)) return Math.min(p.at, own ?? Infinity);
     return p && you !== null && you <= p.at ? Math.min(you, own ?? Infinity) : own;
   };
@@ -365,8 +372,9 @@ function row(e, strong, tint) {
         ])),
         when(() => editingKey() === e().key, () => renameField(e)),
         when(() => !compact() && !!e().a, () => Text(() => {
-          const running = runningChildren(e().a).length;
-          return (cleanPrompt(e().a.title) || e().a.name) + (running ? " · " + running + " sub" : "");
+          const running = runningChildren(e().a).length, shells = runningShells(e().ws, e().a).length;
+          return (cleanPrompt(e().a.title) || e().a.name) + (running ? " · " + running + " sub" : "")
+            + (shells ? " · " + shells + " shell" : "");
         })
           .font(10).color("tertiary").lineLimit(1).truncation("tail")),
       ]).layoutPriority(1),

@@ -15,7 +15,10 @@
 #      pairs. Hooks and sidebar data don't carry the model, and every subagent
 #      hand-back starts a turn that looks like a new prompt, so both come from
 #      each session's transcript, refreshed on every run. Agent Inbox times a
-#      run from that prompt, across the hand-back turns it sets off.
+#      run from that prompt, across the hand-back turns it sets off. A Claude
+#      session with background shells still running adds "~<epoch>,<epoch>",
+#      when each started: sidebar data counts background subagents but not
+#      shells, so a turn that ends with one running would otherwise look idle.
 #   4. After the models, after another invisible separator (U+2062), Claude's
 #      plan usage as record-usage.sh last cached it:
 #      "5h=<percent>@<reset epoch> 7d=<percent>@<reset epoch> t=<epoch>".
@@ -75,6 +78,25 @@ USAGE_SEP="$(printf '\xe2\x81\xa2')"
 # so neither pattern matches inside them.
 # Codex records the selected model in turn_context.payload.model. Read the
 # latest context rather than session defaults so model switches are reflected.
+#
+# Background shells a Claude session started (run_in_background, or a command
+# sent to the background) and that haven't finished, as a comma-separated list
+# of their start epochs. Each start leaves a tool result with a
+# backgroundTaskId, and each end a task-notification naming that id
+# (completed, failed, or killed by you) or, when Claude stops it, a TaskStop
+# result with that task_id. Hooks don't fire when one finishes, but its
+# notification starts a turn whose Stop refreshes this.
+background_shells() {
+  grep -F -e '"backgroundTaskId":"' -e '"origin":{"kind":"task-notification"' -e '"message":"Successfully stopped task' "$1" 2>/dev/null |
+    jq -Rrs '[split("\n")[] | fromjson?] as $entries
+      | [$entries[] | (select(.origin.kind? == "task-notification")
+          | .message.content | tostring | (capture("<task-id>(?<id>[^<]+)</task-id>").id)?),
+          (.toolUseResult.task_id? // empty)] as $done
+      | [$entries[] | (.toolUseResult.backgroundTaskId?) as $id
+          | select($id != null and ($done | index([$id]) | not))
+          | .timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdate | tostring] | join(",")' 2>/dev/null || true
+}
+
 session_models() {
   cmux sessions list --json |
     jq -r --arg ws "$ws" '.sessions[]
@@ -92,7 +114,8 @@ session_models() {
       model="$( (tail -r "$transcript" 2>/dev/null || true) | grep -m1 '"message":{"model":"claude-' | jq -r '.message.model // empty' || true)"
       asked="$( (tail -r "$transcript" 2>/dev/null || true) | grep -m1 '"origin":{"kind":"human"' |
         jq -r 'select(.type == "user") | .timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdate' 2>/dev/null || true)"
-      if [ -n "$model$asked" ]; then printf '%s=%s%s ' "${sid:0:8}" "$model" "${asked:+@$asked}"; fi
+      shells="$(background_shells "$transcript")"
+      if [ -n "$model$asked$shells" ]; then printf '%s=%s%s%s ' "${sid:0:8}" "$model" "${asked:+@$asked}" "${shells:+~$shells}"; fi
     done | sed 's/ $//'
 }
 
