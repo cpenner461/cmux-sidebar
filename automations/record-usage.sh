@@ -14,7 +14,7 @@
 set -uo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:/Applications/cmux.app/Contents/Resources/bin:$PATH"
 
-cache="${XDG_CACHE_HOME:-$HOME/.cache}/cmux-panel/usage"
+cache="${XDG_CACHE_HOME:-$HOME/.cache}/cmux-agent-inbox/usage"
 line="$(jq -r '[.rate_limits // {} | (.five_hour, .seven_day) | select(.used_percentage != null)] as $l
   | if ($l | length) == 2 then "5h=\($l[0].used_percentage | floor)@\($l[0].resets_at // 0) 7d=\($l[1].used_percentage | floor)@\($l[1].resets_at // 0)" else empty end' 2>/dev/null)"
 [ -n "$line" ] || exit 0

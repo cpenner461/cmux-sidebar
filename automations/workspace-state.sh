@@ -64,7 +64,7 @@ fi
 # read-modify-write of each workspace's description so neither loses the other.
 if [ -z "${CMUX_PANEL_LOCKED:-}" ]; then
   export CMUX_PANEL_LOCKED=1
-  exec lockf -k -t 20 "${TMPDIR:-/tmp}/cmux-panel-$ws.lock" "$0" "$mode" "$ws"
+  exec lockf -k -t 20 "${TMPDIR:-/tmp}/cmux-agent-inbox-$ws.lock" "$0" "$mode" "$ws"
 fi
 
 SEP="$(printf '\xe2\x81\xa4')"
@@ -133,7 +133,7 @@ is_ping() {
   esac
   return 1
 }
-usage="$(cat "${XDG_CACHE_HOME:-$HOME/.cache}/cmux-panel/usage" 2>/dev/null || true)"
+usage="$(cat "${XDG_CACHE_HOME:-$HOME/.cache}/cmux-agent-inbox/usage" 2>/dev/null || true)"
 
 case "$mode" in
   stop) marked="$MARK"; is_ping "$summary" && summary="" ;;

@@ -1,43 +1,124 @@
-# cmux-panel
+# Agent Inbox
 
-Custom [cmux](https://github.com/manaflow-ai/cmux) sidebars.
-
-## Agent Inbox
-
-Agent Inbox replaces the workspace list with your agent sessions grouped by what they need from you. It answers "what needs me right now": sessions waiting on you get the loudest section at the top, and everything else stays quiet below it.
-
-Claude and Codex sessions are identified by cmux's agent kind and labeled beside the workspace title, including in compact view and when the session has a custom title. Codex uses the same status sections, subagent counts, and navigation as other sessions. To have cmux report Codex sessions, install its integration with `cmux hooks codex install` before starting Codex in a cmux terminal (see [cmux's agent hooks](https://github.com/manaflow-ai/cmux/blob/main/docs/agent-hooks.md)). The workspace-state automation reads Codex's latest turn context from its transcript to show the selected model (for example, `Codex · gpt-6.1-sol`), refreshing it on subsequent automation events after a model switch. Before a model is recorded, the row shows just `Codex`. Transcript-based prompt timing and usage meters remain Claude-specific.
-
-Sessions fall into four sections. INBOX (orange) holds sessions waiting on you: a finished turn you haven't looked at yet, or a permission prompt or question you haven't answered. It works like an unread filter, so a finished turn stays there until you view its workspace (cmux's own unread count, the badge the stock sidebar shows), while a real question stays until you answer it. WORKING (purple) holds sessions mid-turn, and sessions whose turn has ended while background subagents or shells they launched are still running, with a spinner in place of the status dot and a live "running 3m 07s" line. That time counts from the prompt you typed, not the latest turn, so a task that keeps going through subagent hand-backs (each of which starts a turn of its own) shows its whole run. When those subagents report back, the session finishes a turn of its own and moves to INBOX. IDLE (teal) holds sessions that are done and read. AGENTLESS, a brown outline with no fill, lists workspaces with no live session, and is hidden while empty. Within each section, rows follow workspace order, so they never jump around as activity changes.
-
-Each row shows the workspace title (plus `[^N]` for the tab hosting the session) and the model the session last answered with, the session's title and how many subagents it is running, its ⌘1–⌘9 hotkey (on a red pill for the selected workspace), and how long it has been in its current state. Under that are Claude's latest summary, your last prompt, and the branch, dirty marker, PR chips and port chips; clicking a PR or port chip opens it. Clicking a row selects its workspace; Option- or Command-click also focuses the session's tab. Right-click offers Go to Agent Tab, Pin/Unpin Workspace, an inline Rename Workspace, and Mark as Read/Unread, which moves the workspace's sessions in or out of INBOX. A pinned workspace (cmux's own pin) leads whichever section it's in, with a yellow pin and a faint yellow tint, which suits a go-to terminal with no agent.
-
-Next to the title, an hourglass and a calendar with their percentages, each over a thin meter line, show how much of Claude's 5-hour session and 7-day limits you've used, the figures `/usage` shows, turning orange at 75% and red at 90%; hover it to see when each resets. It's hidden until usage has been recorded (see Install).
-
-Below the sections, a blue RECENT FEED logs what agents did, newest first: turns started (with your prompt) and finished (with Claude's summary), questions, subagents starting and finishing, sessions starting and ending, and PRs linked, merged or closed. It shows the last 10, with "show more" at the bottom to go further back. Clicking a line selects its workspace, and clicking the label folds it away. Sidebars can't read files or keep state, so the feed is built by comparing each update cmux pushes with the last one. It starts over whenever cmux reloads the sidebar, seeded from what cmux still holds: each session's latest prompt and when its turn finished, subagents' start and end times, and ended sessions. Anything older than that isn't available to it.
-
-For a narrow sidebar, the arrows icon next to the usage readout (blue while on) switches to a compact view. Rows keep the status dot or spinner, the workspace title, the model, the hotkey and the time in state, plus the branch line, with a working session's run time at the right end of it instead of on a line of its own. The session title, summary, prompt, and PR and port chips are hidden, the usage meters narrow, and the feed drops its timestamps, keeps each item to one line of detail, and starts at 5 items instead of 10. Sidebars aren't told their width and can't change it or keep state, so this is a manual switch, and it goes back to the full view whenever cmux reloads the sidebar.
+Agent Inbox is a sidebar for [cmux](https://github.com/manaflow-ai/cmux). It shows your Claude Code and Codex sessions in groups. Each group tells you what a session needs from you. Sessions that wait for you are at the top.
 
 ## Install
 
-Run `./install.sh` to symlink everything in `sidebars/` into `~/.config/cmux/sidebars/`. Then right-click the sidebar toggle button and pick a sidebar, or run `cmux sidebar select "Agent Inbox"` (left sidebar) or `cmux sidebar open "Agent Inbox"` (as a pane). Because the installed files are symlinks, edits here are what cmux runs; to uninstall, delete the symlinks.
+1. Run `./install.sh`.
+2. Right-click the sidebar toggle button and select **Agent Inbox**. Or run `cmux sidebar select "Agent Inbox"`.
+3. To show Codex sessions, run `cmux hooks codex install`. Do this before you start Codex in a cmux terminal.
+4. To show plan usage, add this line to your Claude Code statusline command. Put it after the command reads its input into `$input`:
 
-Custom sidebars aren't given the notification text the stock sidebar shows (Claude's "what I did" summary), and cmux reports Claude's idle reminder (about a minute after a turn ends) as "needs input", the same as a real permission prompt or question. So `install.sh` also adds three rules (ids starting `cmux-panel-`) to `~/.cmuxterm/automations.json` that run `automations/workspace-state.sh` on Stop, prompt submit, and new notifications. The script keeps the workspace description set to the latest summary, ending in an invisible marker while Claude's turn is finished, and Agent Inbox uses that marker to tell a real question from an idle reminder. Status pings ("Agent is asking a question", "Claude needs your permission…", the idle reminder) only describe a wait, so the idle reminder never replaces a turn's summary, the next prompt or Stop drops any ping, and Agent Inbox hides a ping on a session that is no longer waiting, since answering a question or permission fires no hook that could clear it. On Stop it also marks the workspace unread if it's the one you have selected, since cmux doesn't count notifications for that workspace and the finished turn would otherwise skip INBOX; it then stays in INBOX until you switch away and back or mark it read. Before the marker it also records each session's model and when you last typed a prompt to it, read from the session's transcript, since sidebar data doesn't include the model and its latest prompt is often a subagent hand-back; the stock sidebar shows that list as `<session id prefix>=<model id>@<epoch>` after the summary. A Claude session with background shells still running (cmux's own sidebar data reports it as idle) adds `~<epoch>,…`, when each started, read from the transcript on every run, so a turn that ends with a script still going stays in WORKING until the script's notification starts a new turn. This overwrites any description you set by hand. Remove the `cmux-panel-` rules to turn it off.
+   ```sh
+   printf "%s" "$input" | /path/to/cmux-agent-inbox/automations/record-usage.sh &
+   ```
 
-Sidebar data doesn't include plan usage either, but Claude Code passes it to your statusline command, so add this line to that command after it reads its input into `$input`:
+To open Agent Inbox as a pane, run `cmux sidebar open "Agent Inbox"`.
 
-```sh
-printf "%s" "$input" | /path/to/cmux-sidebar/automations/record-usage.sh &
-```
+`install.sh` is safe to run again. It does these tasks:
 
-`record-usage.sh` caches the latest figures in `~/.cache/cmux-panel/usage` and, when they change, has `workspace-state.sh` add them to the description of the session's workspace as one more invisible segment. Every workspace picks up the latest copy on its next update, and Agent Inbox shows whichever copy is newest. Plans without usage limits (API keys) report none, and the readout stays hidden.
+- It links `sidebars/Agent Inbox.js` into `~/.config/cmux/sidebars/`. Thus cmux runs the file in this repository.
+- It adds automation rules to `~/.cmuxterm/automations.json`. The IDs of these rules start with `cmux-agent-inbox-`. It keeps a backup of the old file.
+- It gives a name to each workspace that has no name and has an agent.
 
-Two more rules run `automations/name-workspace.sh` when an agent session starts and when you submit a prompt, naming a workspace that has no name of its own after the project its agent works in: the git root of the agent's directory (`cmux-sidebar` for this repo, even from a subdirectory; a worktree is its own root), or the directory itself outside a repo. Without it, an unnamed workspace shows its focused tab's title, which Claude Code keeps setting to a summary of the conversation, so the name drifts with focus and from session to session. The directory a workspace opens in is no better a guide, since cmux opens new workspaces wherever the current one's terminal is. The project name is a real workspace name, so it shows everywhere cmux shows one, and renaming the workspace yourself replaces it. Workspaces that never run an agent keep cmux's default. `install.sh` also names unnamed workspaces that already have an agent running.
+To remove Agent Inbox, delete the link in `~/.config/cmux/sidebars/`. Then remove the `cmux-agent-inbox-` rules from `~/.cmuxterm/automations.json`.
+
+## Sections
+
+| Section | Color | Sessions in the section |
+| --- | --- | --- |
+| INBOX | Orange | A finished turn that you did not read. A question or a permission prompt that you did not answer. |
+| WORKING | Purple | A turn that runs. Or a finished turn with background subagents or shells that still run. |
+| IDLE | Teal | A finished turn that you read. |
+| AGENTLESS | Brown outline | A workspace with no live session. This section shows only when it has a workspace. |
+
+A finished turn stays in INBOX until you open its workspace. A question stays in INBOX until you answer it.
+
+A WORKING row shows a spinner and the time that the run uses, for example "running 3m 07s". The time starts at your prompt. Subagent results start new turns, but the time does not start again.
+
+In each section, the rows have the same order as the workspaces. Rows do not move when their status changes.
+
+## Rows
+
+Each row shows:
+
+- The workspace title. `[^N]` shows the tab of the session.
+- The agent and its model, for example `Claude · Opus 5.5` or `Codex · gpt-6.1-sol`.
+- The session title, with the number of subagents and shells that run.
+- The hotkey (⌘1 to ⌘9). A red background shows the selected workspace.
+- The time in the current status.
+- The last summary from the agent, and your last prompt.
+- The git branch, a mark for changes that are not committed, pull requests, and ports.
+
+| Action | Result |
+| --- | --- |
+| Click a row | Selects the workspace. |
+| Option-click or Command-click a row | Selects the workspace and the tab of the session. |
+| Click a pull request or a port | Opens it. |
+| Right-click a row | Shows Go to Agent Tab, Pin/Unpin Workspace, Rename Workspace, and Mark as Read/Unread. |
+
+A pinned workspace is the first row in its section. It shows a yellow pin.
+
+## Plan usage
+
+An hourglass and a calendar show how much of the Claude 5-hour and 7-day limits you used. These are the values that `/usage` shows. The color changes to orange at 75% and to red at 90%. Put the pointer on the meters to see when each limit resets.
+
+The meters show only after the statusline command records usage. Plans with no usage limits (API keys) show no meters.
+
+## Recent feed
+
+The RECENT FEED is below the sections. It shows agent events, with the newest event first:
+
+- Turns that start and finish
+- Questions
+- Subagents that start and finish
+- Sessions that start and end
+- Pull requests that are linked, merged, or closed
+
+The feed shows 10 events. Click "show more" to see more. Click an event to select its workspace. Click the label to close the feed.
+
+When cmux reloads the sidebar, the feed starts again. It then shows only the data that cmux keeps.
+
+## Compact view
+
+Click the arrows icon next to the usage meters to show the compact view. The icon is blue when the compact view is on. Use it for a narrow sidebar.
+
+The compact view shows the status, workspace title, model, hotkey, time, and branch. It does not show the session title, summary, prompt, pull requests, or ports. The feed starts with 5 events.
+
+When cmux reloads the sidebar, the full view comes back.
+
+## How it works
+
+Agent Inbox gets less data than the standard cmux sidebar. The automations in `automations/` add the missing data to the description of each workspace. Agent Inbox reads the description. The data uses characters that you cannot see. These scripts replace a description that you write yourself.
+
+`workspace-state.sh` runs on Stop, on prompt submit, and on each notification. It records these items:
+
+- The last summary from Claude.
+- A mark when the turn is finished. cmux reports the Claude idle reminder as "needs input". Without the mark, the idle reminder looks the same as a real question.
+- The model of each session, and the time of your last prompt. It reads them from the transcript.
+- The start time of each background shell that still runs. cmux reports such a session as idle.
+- The last plan usage from `record-usage.sh`.
+
+When a turn finishes in the selected workspace, the script marks the workspace as unread. cmux does not count notifications for the selected workspace. Without the mark, the turn goes directly to IDLE.
+
+A background shell stays in WORKING until the next Stop of its session. Usually this is quick, because the shell result starts a new turn. If the Claude process stops while a shell runs, the row stays in WORKING until the next turn finishes.
+
+`name-workspace.sh` runs when a session starts and on prompt submit. It gives a name to each workspace that has no name. The name is the git root of the agent directory, for example `cmux-agent-inbox`. Outside a repository, the name is the directory. Without this name, the workspace shows the title of its tab, and Claude Code changes that title frequently. If you rename the workspace, your name stays.
 
 ## Development
 
-`cmux sidebar validate` only checks that a file loads, so run `node scripts/check-sidebar.js sidebars/<name>.js` after an edit: it runs the sidebar against the runtime inside your installed cmux with sample data and fails on errors like a modifier your cmux version doesn't support.
+`cmux sidebar validate` only makes sure that a file loads. After you change Agent Inbox, run:
 
-Run `node scripts/check-workspace-state.js` to check model extraction and refresh against isolated transcript fixtures, including incomplete and missing files, without a running cmux app.
+```sh
+node scripts/check-sidebar.js "sidebars/Agent Inbox.js"
+```
 
-`sidebars/Agent Inbox.js` is adapted from cmux's `Examples/CustomSidebars/agents-board.js`, which is licensed GPL-3.0-or-later.
+This script runs the sidebar in the cmux runtime with sample data. It finds errors, for example a modifier that your cmux version does not support.
+
+To test `workspace-state.sh` without cmux, run:
+
+```sh
+node scripts/check-workspace-state.js
+```
+
+`sidebars/Agent Inbox.js` comes from `Examples/CustomSidebars/agents-board.js` in cmux. Its license is GPL-3.0-or-later.

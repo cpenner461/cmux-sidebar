@@ -29,7 +29,8 @@ done
 # Claude's latest summary and its "turn finished" marker (see
 # automations/workspace-state.sh), and that name each unnamed workspace after
 # the project its agent works in (see automations/name-workspace.sh). Replaces
-# our own rules (ids prefixed cmux-panel-) and leaves any other rules alone.
+# our own rules (ids prefixed cmux-agent-inbox-, or cmux-panel- from before the
+# rename) and leaves any other rules alone.
 automations="${CMUX_AUTOMATIONS_FILE:-$HOME/.cmuxterm/automations.json}"
 state_script="$repo_dir/automations/workspace-state.sh"
 name_script="$repo_dir/automations/name-workspace.sh"
@@ -42,12 +43,12 @@ fi
 tmp="$(mktemp)"
 jq --arg state "$state_script" --arg name "$name_script" '
   def rule($id; $event; $command): {
-    id: ("cmux-panel-" + $id),
+    id: ("cmux-agent-inbox-" + $id),
     when: { event: $event },
     rate_limit: { interval_seconds: 1, maximum: 20 },
     then: [{ action: "run", command: $command, timeout_seconds: 30 }]
   };
-  .rules = ([.rules[]? | select(.id | startswith("cmux-panel-") | not)] + [
+  .rules = ([.rules[]? | select(.id | (startswith("cmux-agent-inbox-") or startswith("cmux-panel-")) | not)] + [
     rule("turn-finished"; "agent.hook.Stop"; $state + " stop"),
     rule("prompt-submitted"; "agent.hook.UserPromptSubmit"; $state + " prompt"),
     rule("notification-summary"; "notification.created"; $state + " notification"),
@@ -56,7 +57,13 @@ jq --arg state "$state_script" --arg name "$name_script" '
   ])' "$automations" > "$tmp"
 mv "$tmp" "$automations"
 cmux automation reload >/dev/null
-echo "registered cmux-panel automations in $automations"
+echo "registered cmux-agent-inbox automations in $automations"
+
+# Keep the plan usage recorded before the rename.
+cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}"
+if [ -d "$cache_dir/cmux-panel" ] && [ ! -e "$cache_dir/cmux-agent-inbox" ]; then
+  mv "$cache_dir/cmux-panel" "$cache_dir/cmux-agent-inbox"
+fi
 
 # Backfill now instead of waiting for each workspace's next event: copy in the
 # latest summary, and mark workspaces whose last "Completed" notification is
